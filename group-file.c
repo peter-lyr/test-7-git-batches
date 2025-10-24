@@ -26,25 +26,74 @@ typedef struct {
 typedef struct {
   FileGroup *groups;
   int group_count;
+  int groups_capacity;
   long long total_input_size;
   long long skipped_size;
   int total_files;
   int total_directories;
 } GroupResult;
 
+// 安全的内存分配函数
+void *safe_malloc(size_t size) {
+  void *ptr = malloc(size);
+  if (!ptr) {
+    fprintf(stderr, "错误: 内存分配失败 (申请大小: %zu 字节)\n", size);
+    exit(EXIT_FAILURE);
+  }
+  return ptr;
+}
+
+void *safe_realloc(void *ptr, size_t size) {
+  void *new_ptr = realloc(ptr, size);
+  if (!new_ptr && size > 0) {
+    fprintf(stderr, "错误: 内存重新分配失败 (申请大小: %zu 字节)\n", size);
+    free(ptr);
+    exit(EXIT_FAILURE);
+  }
+  return new_ptr;
+}
+
 // 字符编码转换函数
 wchar_t *char_to_wchar(const char *str) {
   int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
-  wchar_t *wstr = (wchar_t *)malloc(len * sizeof(wchar_t));
-  MultiByteToWideChar(CP_UTF8, 0, str, -1, wstr, len);
+  if (len <= 0) {
+    return NULL;
+  }
+
+  wchar_t *wstr = (wchar_t *)safe_malloc(len * sizeof(wchar_t));
+  if (MultiByteToWideChar(CP_UTF8, 0, str, -1, wstr, len) == 0) {
+    free(wstr);
+    return NULL;
+  }
   return wstr;
 }
 
 char *wchar_to_char(const wchar_t *wstr) {
+  if (!wstr)
+    return NULL;
+
   int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
-  char *str = (char *)malloc(len);
-  WideCharToMultiByte(CP_UTF8, 0, wstr, -1, str, len, NULL, NULL);
+  if (len <= 0) {
+    return NULL;
+  }
+
+  char *str = (char *)safe_malloc(len);
+  if (WideCharToMultiByte(CP_UTF8, 0, wstr, -1, str, len, NULL, NULL) == 0) {
+    free(str);
+    return NULL;
+  }
   return str;
+}
+
+// 安全的路径拼接函数
+int safe_path_join(wchar_t *dest, size_t dest_size, const wchar_t *path1,
+                   const wchar_t *path2) {
+  if (_snwprintf_s(dest, dest_size, _TRUNCATE, L"%s\\%s", path1, path2) < 0) {
+    // 路径被截断
+    dest[dest_size - 1] = L'\0';
+    return 0; // 失败
+  }
+  return 1; // 成功
 }
 
 // 递归计算文件夹大小
@@ -52,7 +101,10 @@ long long calculate_directory_size(const wchar_t *wpath,
                                    long long *total_scanned_size) {
   long long total_size = 0;
   wchar_t search_path[MAX_PATH_LENGTH];
-  _snwprintf_s(search_path, MAX_PATH_LENGTH, _TRUNCATE, L"%s\\*", wpath);
+
+  if (!safe_path_join(search_path, MAX_PATH_LENGTH, wpath, L"*")) {
+    return 0;
+  }
 
   WIN32_FIND_DATAW find_data;
   HANDLE hFind = FindFirstFileW(search_path, &find_data);
@@ -68,16 +120,19 @@ long long calculate_directory_size(const wchar_t *wpath,
     }
 
     wchar_t full_path[MAX_PATH_LENGTH];
-    _snwprintf_s(full_path, MAX_PATH_LENGTH, _TRUNCATE, L"%s\\%s", wpath,
-                 find_data.cFileName);
+    if (!safe_path_join(full_path, MAX_PATH_LENGTH, wpath,
+                        find_data.cFileName)) {
+      continue; // 跳过路径过长的文件
+    }
 
     if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
       total_size += calculate_directory_size(full_path, total_scanned_size);
     } else {
-      long long file_size =
-          ((ULONGLONG)find_data.nFileSizeHigh << 32) | find_data.nFileSizeLow;
-      total_size += file_size;
-      *total_scanned_size += file_size;
+      ULARGE_INTEGER file_size;
+      file_size.LowPart = find_data.nFileSizeLow;
+      file_size.HighPart = find_data.nFileSizeHigh;
+      total_size += file_size.QuadPart;
+      *total_scanned_size += file_size.QuadPart;
     }
   } while (FindNextFileW(hFind, &find_data));
 
@@ -91,7 +146,9 @@ void collect_items_recursive(const wchar_t *wpath, FileItem *items,
                              long long *total_scanned_size,
                              long long *skipped_files_size) {
   wchar_t search_path[MAX_PATH_LENGTH];
-  _snwprintf_s(search_path, MAX_PATH_LENGTH, _TRUNCATE, L"%s\\*", wpath);
+  if (!safe_path_join(search_path, MAX_PATH_LENGTH, wpath, L"*")) {
+    return;
+  }
 
   WIN32_FIND_DATAW find_data;
   HANDLE hFind = FindFirstFileW(search_path, &find_data);
@@ -107,8 +164,11 @@ void collect_items_recursive(const wchar_t *wpath, FileItem *items,
     }
 
     wchar_t full_path[MAX_PATH_LENGTH];
-    _snwprintf_s(full_path, MAX_PATH_LENGTH, _TRUNCATE, L"%s\\%s", wpath,
-                 find_data.cFileName);
+    if (!safe_path_join(full_path, MAX_PATH_LENGTH, wpath,
+                        find_data.cFileName)) {
+      printf("警告: 路径过长被跳过: %s\\%s\n", wpath, find_data.cFileName);
+      continue;
+    }
 
     if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
       // 计算文件夹大小
@@ -119,11 +179,17 @@ void collect_items_recursive(const wchar_t *wpath, FileItem *items,
         // 文件夹大小合适，添加到列表
         if (*item_count < MAX_ITEMS) {
           char *char_path = wchar_to_char(full_path);
-          strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, char_path);
-          items[*item_count].size = dir_size;
-          items[*item_count].type = TYPE_DIRECTORY;
-          (*item_count)++;
-          free(char_path);
+          if (char_path) {
+            if (strlen(char_path) < MAX_PATH_LENGTH - 1) {
+              strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, char_path);
+              items[*item_count].size = dir_size;
+              items[*item_count].type = TYPE_DIRECTORY;
+              (*item_count)++;
+            } else {
+              printf("警告: 路径过长被跳过: %s\n", char_path);
+            }
+            free(char_path);
+          }
         }
       } else {
         // 文件夹太大，递归处理子项
@@ -132,25 +198,34 @@ void collect_items_recursive(const wchar_t *wpath, FileItem *items,
       }
     } else {
       // 处理文件
-      long long file_size =
-          ((ULONGLONG)find_data.nFileSizeHigh << 32) | find_data.nFileSizeLow;
-      *total_scanned_size += file_size;
+      ULARGE_INTEGER file_size;
+      file_size.LowPart = find_data.nFileSizeLow;
+      file_size.HighPart = find_data.nFileSizeHigh;
+      *total_scanned_size += file_size.QuadPart;
 
-      if (file_size > MAX_GROUP_SIZE) {
+      if (file_size.QuadPart > MAX_GROUP_SIZE) {
         char *char_path = wchar_to_char(full_path);
-        printf("跳过大文件: %s (%.2f MB)\n", char_path,
-               file_size / (1024.0 * 1024.0));
-        *skipped_files_size += file_size;
-        free(char_path);
+        if (char_path) {
+          printf("跳过大文件: %s (%.2f MB)\n", char_path,
+                 file_size.QuadPart / (1024.0 * 1024.0));
+          free(char_path);
+        }
+        *skipped_files_size += file_size.QuadPart;
       } else {
         // 文件大小合适，添加到列表
         if (*item_count < MAX_ITEMS) {
           char *char_path = wchar_to_char(full_path);
-          strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, char_path);
-          items[*item_count].size = file_size;
-          items[*item_count].type = TYPE_FILE;
-          (*item_count)++;
-          free(char_path);
+          if (char_path) {
+            if (strlen(char_path) < MAX_PATH_LENGTH - 1) {
+              strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, char_path);
+              items[*item_count].size = file_size.QuadPart;
+              items[*item_count].type = TYPE_FILE;
+              (*item_count)++;
+            } else {
+              printf("警告: 路径过长被跳过: %s\n", char_path);
+            }
+            free(char_path);
+          }
         }
       }
     }
@@ -166,20 +241,22 @@ void collect_items_recursive(const wchar_t *wpath, FileItem *items,
       int already_added = 0;
       char *root_char_path = wchar_to_char(wpath);
 
-      for (int i = 0; i < *item_count; i++) {
-        if (strcmp(items[i].path, root_char_path) == 0) {
-          already_added = 1;
-          break;
+      if (root_char_path) {
+        for (int i = 0; i < *item_count; i++) {
+          if (strcmp(items[i].path, root_char_path) == 0) {
+            already_added = 1;
+            break;
+          }
         }
-      }
 
-      if (!already_added) {
-        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, root_char_path);
-        items[*item_count].size = root_size;
-        items[*item_count].type = TYPE_DIRECTORY;
-        (*item_count)++;
+        if (!already_added && strlen(root_char_path) < MAX_PATH_LENGTH - 1) {
+          strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, root_char_path);
+          items[*item_count].size = root_size;
+          items[*item_count].type = TYPE_DIRECTORY;
+          (*item_count)++;
+        }
+        free(root_char_path);
       }
-      free(root_char_path);
     }
   }
 }
@@ -190,6 +267,10 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
                         long long *total_scanned_size,
                         long long *skipped_files_size) {
   wchar_t *wpath = char_to_wchar(path);
+  if (!wpath) {
+    printf("警告: 无法转换路径编码: %s\n", path);
+    return;
+  }
 
   DWORD attr = GetFileAttributesW(wpath);
   if (attr == INVALID_FILE_ATTRIBUTES) {
@@ -221,22 +302,29 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
     if (hFile != INVALID_HANDLE_VALUE) {
       DWORD sizeLow, sizeHigh;
       sizeLow = GetFileSize(hFile, &sizeHigh);
-      long long file_size = ((ULONGLONG)sizeHigh << 32) | sizeLow;
       CloseHandle(hFile);
 
-      *total_input_size += file_size;
-      *total_scanned_size += file_size;
+      ULARGE_INTEGER file_size;
+      file_size.LowPart = sizeLow;
+      file_size.HighPart = sizeHigh;
 
-      if (file_size > MAX_GROUP_SIZE) {
+      *total_input_size += file_size.QuadPart;
+      *total_scanned_size += file_size.QuadPart;
+
+      if (file_size.QuadPart > MAX_GROUP_SIZE) {
         printf("跳过大文件: %s (%.2f MB)\n", path,
-               file_size / (1024.0 * 1024.0));
-        *skipped_files_size += file_size;
+               file_size.QuadPart / (1024.0 * 1024.0));
+        *skipped_files_size += file_size.QuadPart;
       } else {
         if (*item_count < MAX_ITEMS) {
-          strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, path);
-          items[*item_count].size = file_size;
-          items[*item_count].type = TYPE_FILE;
-          (*item_count)++;
+          if (strlen(path) < MAX_PATH_LENGTH - 1) {
+            strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, path);
+            items[*item_count].size = file_size.QuadPart;
+            items[*item_count].type = TYPE_FILE;
+            (*item_count)++;
+          } else {
+            printf("警告: 路径过长被跳过: %s\n", path);
+          }
         }
       }
     }
@@ -269,8 +357,10 @@ GroupResult group_files(FileItem *items, int item_count) {
 
   // 为分组分配合理的内存
   int initial_group_count = (item_count / 100) + 10; // 预估分组数
-  result.groups = malloc(sizeof(FileGroup) * initial_group_count);
+  result.groups =
+      (FileGroup *)safe_malloc(sizeof(FileGroup) * initial_group_count);
   result.group_count = 0;
+  result.groups_capacity = initial_group_count;
 
   // 按类型和大小排序
   printf("正在排序 %d 个项...\n", item_count);
@@ -278,7 +368,8 @@ GroupResult group_files(FileItem *items, int item_count) {
 
   // 初始化分组
   for (int i = 0; i < initial_group_count; i++) {
-    result.groups[i].items = malloc(sizeof(FileItem) * 1000); // 合理的初始容量
+    result.groups[i].items =
+        (FileItem *)safe_malloc(sizeof(FileItem) * 1000); // 合理的初始容量
     result.groups[i].count = 0;
     result.groups[i].capacity = 1000;
     result.groups[i].total_size = 0;
@@ -311,28 +402,34 @@ GroupResult group_files(FileItem *items, int item_count) {
 
       // 检查是否需要扩展容量
       if (group->count >= group->capacity) {
-        group->capacity *= 2;
-        group->items =
-            realloc(group->items, sizeof(FileItem) * group->capacity);
+        int new_capacity = group->capacity * 2;
+        FileItem *new_items = (FileItem *)safe_realloc(
+            group->items, sizeof(FileItem) * new_capacity);
+        group->items = new_items;
+        group->capacity = new_capacity;
       }
 
       group->items[group->count++] = items[i];
       group->total_size += items[i].size;
     } else {
       // 创建新分组
-      if (result.group_count >= initial_group_count) {
+      if (result.group_count >= result.groups_capacity) {
         // 需要扩展分组数组
-        initial_group_count *= 2;
-        result.groups =
-            realloc(result.groups, sizeof(FileGroup) * initial_group_count);
+        int new_capacity = result.groups_capacity * 2;
+        FileGroup *new_groups = (FileGroup *)safe_realloc(
+            result.groups, sizeof(FileGroup) * new_capacity);
 
         // 初始化新分配的分组
-        for (int k = result.group_count; k < initial_group_count; k++) {
-          result.groups[k].items = malloc(sizeof(FileItem) * 1000);
-          result.groups[k].count = 0;
-          result.groups[k].capacity = 1000;
-          result.groups[k].total_size = 0;
+        for (int k = result.group_count; k < new_capacity; k++) {
+          new_groups[k].items =
+              (FileItem *)safe_malloc(sizeof(FileItem) * 1000);
+          new_groups[k].count = 0;
+          new_groups[k].capacity = 1000;
+          new_groups[k].total_size = 0;
         }
+
+        result.groups = new_groups;
+        result.groups_capacity = new_capacity;
       }
 
       FileGroup *new_group = &result.groups[result.group_count];
@@ -465,10 +562,18 @@ void validate_result(const GroupResult *result, long long input_total_size,
 
 // 释放内存
 void free_group_result(GroupResult *result) {
-  for (int i = 0; i < result->group_count; i++) {
-    free(result->groups[i].items);
+  if (result && result->groups) {
+    for (int i = 0; i < result->groups_capacity; i++) {
+      if (result->groups[i].items) {
+        free(result->groups[i].items);
+        result->groups[i].items = NULL;
+      }
+    }
+    free(result->groups);
+    result->groups = NULL;
   }
-  free(result->groups);
+  result->group_count = 0;
+  result->groups_capacity = 0;
 }
 
 // 新封装的函数：处理输入路径并生成分组结果
@@ -476,7 +581,7 @@ GroupResult process_input_paths(char *paths[], int path_count,
                                 long long *total_scanned_size,
                                 long long *skipped_files_size) {
   // 收集所有文件和文件夹信息
-  FileItem *items = malloc(sizeof(FileItem) * MAX_ITEMS);
+  FileItem *items = (FileItem *)safe_malloc(sizeof(FileItem) * MAX_ITEMS);
   int item_count = 0;
   long long total_input_size = 0;
 
