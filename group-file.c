@@ -680,7 +680,7 @@ void validate_result(const GroupResult *result, long long input_total_size,
   long long calculated_total = total_grouped_size + skipped_files_size;
   long long difference = input_total_size - calculated_total;
   double difference_percent =
-      input_total_size > 0 ? (double)labs(difference) / input_total_size * 100
+      input_total_size > 0 ? (double)difference / input_total_size * 100
                            : 0;
 
   char input_str[32], grouped_str[32], skipped_str[32], scanned_str[32],
@@ -690,13 +690,13 @@ void validate_result(const GroupResult *result, long long input_total_size,
   format_size(skipped_files_size, skipped_str, sizeof(skipped_str));
   format_size(total_scanned_size, scanned_str, sizeof(scanned_str));
   format_size(calculated_total, calc_str, sizeof(calc_str));
-  format_size(labs(difference), diff_str, sizeof(diff_str));
+  format_size(difference, diff_str, sizeof(diff_str));
 
-  printf("  输入总大小: %s\n", input_str);
-  printf("  分组总大小: %s\n", grouped_str);
-  printf("  跳过大文件: %s\n", skipped_str);
-  printf("  扫描总大小: %s\n", scanned_str);
-  printf("  计算总大小: %s\n", calc_str);
+  printf("  输入总大小: %s vs\n", input_str);
+  printf("  分组总大小:(%s +\n", grouped_str);
+  printf("  跳过大文件: %s =\n", skipped_str);
+  printf("  计算总大小: %s)\n", calc_str);
+  printf("（扫描总大小: %s）\n", scanned_str);
   printf("\n");
 
   if (calculated_total == input_total_size) {
@@ -795,17 +795,17 @@ int main() {
 
   // 硬编码的路径数组
   char *input_paths[] = {
-      // "C:\\Windows", // 这个会变
+      "C:\\Windows", // 这个会变
       //
-      "C:\\Users", // 这个会变
+      // "C:\\Users", // 这个会变
       //
-      "C:\\inetpub",
-      "C:\\DumpStack.log",
-      "C:\\OneDriveTemp",
-      "C:\\PerfLogs",
-      "C:\\ProgramFiles",
-      "C:\\ProgramFiles(x86)",
-      "C:\\ProgramData",
+      // "C:\\inetpub",
+      // "C:\\DumpStack.log",
+      // "C:\\OneDriveTemp",
+      // "C:\\PerfLogs",
+      // "C:\\ProgramFiles",
+      // "C:\\ProgramFiles(x86)",
+      // "C:\\ProgramData",
       //
       // "C:\\Recovery", // 这个会变
   };
