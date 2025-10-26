@@ -769,7 +769,157 @@ GroupResult process_input_paths(char *paths[], int path_count,
   return result;
 }
 
-// 主测试函数
+// 执行Git命令的函数
+void execute_git_commands(const GroupResult *result,
+                          const char *commit_info_file) {
+  printf("\n========================================\n");
+  printf("              执行Git操作\n");
+  printf("========================================\n\n");
+
+  if (result->group_count == 0) {
+    printf("[信息] 没有分组需要处理\n");
+    return;
+  }
+
+  // 检查当前目录是否是Git仓库
+  if (system("git status >nul 2>&1") != 0) {
+    printf("[错误] 当前目录不是Git仓库或git命令不可用\n");
+    return;
+  }
+
+  int total_commands = 0;
+  int success_commands = 0;
+  int total_paths_processed = 0;
+
+  // 首先处理所有分组的git add
+  for (int group_idx = 0; group_idx < result->group_count; group_idx++) {
+    const FileGroup *group = &result->groups[group_idx];
+
+    printf("\n处理分组 %d/%d (包含 %d 个项):\n", group_idx + 1,
+           result->group_count, group->count);
+
+    char command_buffer[32768] = "git add"; // Windows命令长度限制约32767字符
+    size_t buffer_len = strlen(command_buffer);
+    int current_command_path_count = 0;
+
+    for (int item_idx = 0; item_idx < group->count; item_idx++) {
+      const FileItem *item = &group->items[item_idx];
+
+      // 构造带引号的路径
+      char quoted_path[MAX_PATH_LENGTH + 10]; // 额外空间用于引号和空格
+      snprintf(quoted_path, sizeof(quoted_path), " \"%s\"", item->path);
+      size_t quoted_path_len = strlen(quoted_path);
+
+      // 检查是否超过命令长度限制
+      if (buffer_len + quoted_path_len >= 4000) {
+        // 执行当前命令
+        printf("  执行命令: git add [%d个路径]\n", current_command_path_count);
+
+        int ret = system(command_buffer);
+        total_commands++;
+        if (ret == 0) {
+          success_commands++;
+          printf("    [成功] 命令执行成功\n");
+        } else {
+          printf("    [失败] 命令返回代码: %d\n", ret);
+        }
+
+        // 重置命令缓冲区和计数器
+        strcpy(command_buffer, "git add");
+        buffer_len = strlen(command_buffer);
+        total_paths_processed += current_command_path_count;
+        current_command_path_count = 0;
+      }
+
+      // 添加路径到命令
+      if (buffer_len + quoted_path_len < sizeof(command_buffer)) {
+        strcat(command_buffer, quoted_path);
+        buffer_len += quoted_path_len;
+        current_command_path_count++;
+      }
+    }
+
+    // 执行分组最后一个命令（如果有内容）
+    if (current_command_path_count > 0) {
+      printf("  执行命令: git add [%d个路径]\n", current_command_path_count);
+
+      int ret = system(command_buffer);
+      total_commands++;
+      if (ret == 0) {
+        success_commands++;
+        printf("    [成功] 命令执行成功\n");
+      } else {
+        printf("    [失败] 命令返回代码: %d\n", ret);
+      }
+      total_paths_processed += current_command_path_count;
+    }
+
+    // 执行git commit
+    if (commit_info_file && commit_info_file[0] != '\0') {
+      printf("\n执行提交: git commit -F %s\n", commit_info_file);
+
+      char commit_command[512];
+      snprintf(commit_command, sizeof(commit_command), "git commit -F \"%s\"",
+               commit_info_file);
+
+      int ret = system(commit_command);
+      total_commands++;
+      if (ret == 0) {
+        success_commands++;
+        printf("[成功] 提交完成\n");
+      } else {
+        printf("[失败] 提交命令返回代码: %d\n", ret);
+      }
+    } else {
+      printf("\n[警告] 未提供提交信息文件，跳过提交步骤\n");
+    }
+
+    // 执行git push
+    printf("\n执行推送: git push\n");
+    int ret = system("git push");
+    total_commands++;
+    if (ret == 0) {
+      success_commands++;
+      printf("[成功] 推送完成\n");
+    } else {
+      printf("[失败] 推送命令返回代码: %d\n", ret);
+    }
+
+    printf("  分组 %d 处理完成，共处理 %d 个路径\n", group_idx + 1,
+           group->count);
+  }
+
+  // 输出统计
+  printf("\nGit操作统计:\n");
+  printf("  总命令数: %d\n", total_commands);
+  printf("  成功命令: %d\n", success_commands);
+  printf("  失败命令: %d\n", total_commands - success_commands);
+  printf("  总处理路径: %d\n", total_paths_processed);
+  printf("  成功率: %.1f%%\n",
+         total_commands > 0 ? (double)success_commands / total_commands * 100
+                            : 0.0);
+}
+
+// 修改后的run_grouping_test函数，增加Git操作
+void run_grouping_test_with_git(char *paths[], int path_count,
+                                const char *commit_info_file) {
+  long long total_scanned_size, skipped_files_size;
+
+  GroupResult result = process_input_paths(
+      paths, path_count, &total_scanned_size, &skipped_files_size);
+
+  print_groups(&result);
+  print_statistics(&result, total_scanned_size, skipped_files_size);
+  validate_result(&result, result.total_input_size, total_scanned_size,
+                  skipped_files_size);
+
+  // 执行Git操作
+  execute_git_commands(&result, commit_info_file);
+
+  free_group_result(&result);
+}
+
+// 主测试函数（不带Git功能）
 void run_grouping_test(char *paths[], int path_count) {
   long long total_scanned_size, skipped_files_size;
 
@@ -784,41 +934,120 @@ void run_grouping_test(char *paths[], int path_count) {
   free_group_result(&result);
 }
 
-int main() {
+// 从git status --porcelain获取文件路径
+char **get_git_status_paths(int *path_count) {
+  printf("[Git] 正在执行 git status --porcelain...\n");
+
+  FILE *pipe = _popen("git status --porcelain", "r");
+  if (!pipe) {
+    printf("[错误] 无法执行git命令\n");
+    return NULL;
+  }
+
+  char **paths = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
+  *path_count = 0;
+  char line[MAX_PATH_LENGTH * 2];
+
+  while (fgets(line, sizeof(line), pipe) && *path_count < MAX_ITEMS) {
+    // 跳过git状态前缀（通常是2-3个字符加空格）
+    char *path_start = line;
+    while (*path_start &&
+           (*path_start == ' ' || *path_start == 'M' || *path_start == 'A' ||
+            *path_start == 'D' || *path_start == 'R' || *path_start == 'C' ||
+            *path_start == 'U' || *path_start == '?')) {
+      path_start++;
+    }
+
+    // 移除行尾的换行符
+    size_t len = strlen(path_start);
+    if (len > 0 && path_start[len - 1] == '\n') {
+      path_start[len - 1] = '\0';
+    }
+
+    // 如果路径不为空，则添加到列表中
+    if (strlen(path_start) > 0) {
+      paths[*path_count] = (char *)safe_malloc(strlen(path_start) + 1);
+      strcpy(paths[*path_count], path_start);
+      (*path_count)++;
+    }
+  }
+
+  _pclose(pipe);
+
+  printf("[Git] 找到 %d 个变更文件\n", *path_count);
+  return paths;
+}
+
+// 释放git状态路径内存
+void free_git_status_paths(char **paths, int path_count) {
+  for (int i = 0; i < path_count; i++) {
+    free(paths[i]);
+  }
+  free(paths);
+}
+
+int main(int argc, char *argv[]) {
   // 设置控制台输出为UTF-8
   SetConsoleOutputCP(CP_UTF8);
 
   printf("========================================\n");
-  printf("          文件分组工具\n");
+  printf("          文件分组工具 (带Git功能)\n");
   printf("========================================\n\n");
 
-  // 硬编码的路径数组
-  char *input_paths[] = {
-      "C:\\Windows", // 这个会变
-                     //
-                     // "C:\\Users", // 这个会变
-                     //
-                     // "C:\\inetpub",
-                     // "C:\\DumpStack.log",
-                     // "C:\\OneDriveTemp",
-                     // "C:\\PerfLogs",
-                     // "C:\\ProgramFiles",
-                     // "C:\\ProgramFiles(x86)",
-                     // "C:\\ProgramData",
-                     //
-                     // "C:\\Recovery", // 这个会变
-  };
+  // 检查命令行参数
+  const char *commit_info_file = NULL;
+  int use_git = 0;
 
-  int path_count = sizeof(input_paths) / sizeof(input_paths[0]);
+  if (argc >= 2) {
+    commit_info_file = argv[1];
+    use_git = 1;
+    printf("提交信息文件: %s\n\n", commit_info_file);
+  } else {
+    printf("[信息] 未指定提交信息文件，将跳过Git操作\n");
+    printf("用法: %s <commit-info.txt>\n\n", argv[0]);
+  }
 
-  printf("预设扫描路径:\n");
-  for (int i = 0; i < path_count; i++) {
+  // 从git status获取文件路径
+  int path_count = 0;
+  char **input_paths = get_git_status_paths(&path_count);
+
+  if (path_count == 0 || !input_paths) {
+    printf("[错误] 无法从git status获取文件列表或没有变更文件\n");
+
+    // 使用备用路径（原来的硬编码路径）
+    printf("[信息] 使用备用路径\n");
+    char *backup_paths[] = {
+        ".",
+    };
+    input_paths = backup_paths;
+    path_count = sizeof(backup_paths) / sizeof(backup_paths[0]);
+  }
+
+  printf("扫描路径 (%d 个文件):\n", path_count);
+  for (int i = 0; i < (path_count > 10 ? 10 : path_count); i++) {
     printf("  %d. %s\n", i + 1, input_paths[i]);
+  }
+  if (path_count > 10) {
+    printf("  ... 还有 %d 个文件\n", path_count - 10);
   }
   printf("\n");
 
-  run_grouping_test(input_paths, path_count);
+  // 根据参数选择是否使用Git功能
+  if (use_git) {
+    run_grouping_test_with_git(input_paths, path_count, commit_info_file);
+  } else {
+    run_grouping_test(input_paths, path_count);
+  }
 
-  printf("\n[完成] 处理完成！\n");
+  // 如果是动态分配的内存，需要释放
+  if (input_paths != NULL && path_count > 0) {
+    // 检查是否是动态分配的（通过get_git_status_paths）
+    // 这里简单判断：如果第一个路径不是"."，则认为是动态分配的
+    if (strcmp(input_paths[0], ".") != 0) {
+      free_git_status_paths(input_paths, path_count);
+    }
+  }
+
+  printf("\n[完成] 所有处理完成！\n");
   return 0;
 }
