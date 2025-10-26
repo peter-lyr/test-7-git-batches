@@ -535,18 +535,26 @@ GroupResult group_files(FileItem *items, int item_count) {
   return result;
 }
 
-// 打印分组结果
-void print_groups(const GroupResult *result) {
-  printf("=== 分组结果 ===\n\n");
+// 统一的综合结果输出函数
+void print_comprehensive_results(const GroupResult *result,
+                                 long long total_scanned_size,
+                                 long long skipped_files_size) {
+  printf("╔══════════════════════════════════════════════════════════════╗\n");
+  printf("║                    文件分组综合报告                          ║\n");
+  printf("╚══════════════════════════════════════════════════════════════╝\n");
+  printf("\n");
 
-  int max_groups_to_show = 10; // 只显示前10组详情
+  // 第一部分：分组详情
+  printf("┌───────────────────────── 分组详情 ──────────────────────────┐\n\n");
+
+  int max_groups_to_show = 10;
   int groups_to_show = result->group_count < max_groups_to_show
                            ? result->group_count
                            : max_groups_to_show;
 
   for (int i = 0; i < groups_to_show; i++) {
     printf("分组 %d:\n", i + 1);
-    printf("  总大小: %.2f MB\n",
+    printf("  ├─ 总大小: %.2f MB\n",
            result->groups[i].total_size / (1024.0 * 1024.0));
 
     int file_count = 0, dir_count = 0;
@@ -557,21 +565,21 @@ void print_groups(const GroupResult *result) {
         dir_count++;
       }
     }
-    printf("  文件数: %d, 文件夹数: %d\n", file_count, dir_count);
+    printf("  ├─ 文件数: %d, 文件夹数: %d\n", file_count, dir_count);
 
-    // 只显示前5个项
-    printf("  前5个项:\n");
+    // 显示前3个项
+    printf("  └─ 前3个项:\n");
     int items_to_show =
-        result->groups[i].count < 5 ? result->groups[i].count : 5;
+        result->groups[i].count < 3 ? result->groups[i].count : 3;
     for (int j = 0; j < items_to_show; j++) {
       const char *type_str =
           result->groups[i].items[j].type == TYPE_FILE ? "文件" : "文件夹";
-      printf("    %s: %s (%.2f MB)\n", type_str,
+      printf("      %s: %s (%.2f MB)\n", type_str,
              result->groups[i].items[j].path,
              result->groups[i].items[j].size / (1024.0 * 1024.0));
     }
-    if (result->groups[i].count > 5) {
-      printf("    ... 还有 %d 个项\n", result->groups[i].count - 5);
+    if (result->groups[i].count > 3) {
+      printf("      ... 还有 %d 个项\n", result->groups[i].count - 3);
     }
     printf("\n");
   }
@@ -580,12 +588,9 @@ void print_groups(const GroupResult *result) {
     printf("... 还有 %d 个分组未显示\n\n",
            result->group_count - max_groups_to_show);
   }
-}
 
-// 打印统计信息
-void print_statistics(const GroupResult *result, long long total_scanned_size,
-                      long long skipped_files_size) {
-  printf("=== 统计信息 ===\n\n");
+  // 第二部分：统计信息
+  printf("┌───────────────────────── 统计信息 ──────────────────────────┐\n\n");
 
   long long total_grouped_size = 0;
   int total_grouped_files = 0;
@@ -608,51 +613,44 @@ void print_statistics(const GroupResult *result, long long total_scanned_size,
 
   printf("总分组数: %d\n", result->group_count);
   printf("平均每组大小: %.2f MB\n", avg_group_size / (1024.0 * 1024.0));
-  printf("\n");
   printf("分组文件数: %d\n", total_grouped_files);
   printf("分组文件夹数: %d\n", total_grouped_dirs);
   printf("分组总大小: %.2f MB\n", total_grouped_size / (1024.0 * 1024.0));
   printf("扫描总大小: %.2f MB\n", total_scanned_size / (1024.0 * 1024.0));
-  printf("跳过大文件总大小: %.2f MB\n", skipped_files_size / (1024.0 * 1024.0));
-}
+  printf("跳过大文件总大小: %.2f MB\n\n",
+         skipped_files_size / (1024.0 * 1024.0));
 
-// 验证结果
-void validate_result(const GroupResult *result, long long input_total_size,
-                     long long total_scanned_size,
-                     long long skipped_files_size) {
-  printf("=== 验证结果 ===\n\n");
-
-  long long total_grouped_size = 0;
-  for (int i = 0; i < result->group_count; i++) {
-    total_grouped_size += result->groups[i].total_size;
-  }
+  // 第三部分：验证结果
+  printf("┌───────────────────────── 验证结果 ──────────────────────────┐\n\n");
 
   long long calculated_total = total_grouped_size + skipped_files_size;
 
-  printf("输入总大小: %.2f MB\n", input_total_size / (1024.0 * 1024.0));
+  printf("输入总大小: %.2f MB\n", result->total_input_size / (1024.0 * 1024.0));
   printf("分组总大小: %.2f MB\n", total_grouped_size / (1024.0 * 1024.0));
   printf("跳过大文件总大小: %.2f MB\n", skipped_files_size / (1024.0 * 1024.0));
   printf("扫描总大小: %.2f MB\n", total_scanned_size / (1024.0 * 1024.0));
   printf("计算总大小: %.2f MB\n", calculated_total / (1024.0 * 1024.0));
 
-  if (calculated_total == input_total_size) {
+  if (calculated_total == result->total_input_size) {
     printf("✓ 验证成功: 没有文件遗漏\n");
-  } else if (calculated_total < input_total_size) {
+  } else if (calculated_total < result->total_input_size) {
     printf("⚠ 警告: 可能有文件遗漏 (相差 %.2f MB)\n",
-           (input_total_size - calculated_total) / (1024.0 * 1024.0));
+           (result->total_input_size - calculated_total) / (1024.0 * 1024.0));
     printf("可能原因:\n");
     printf("  1. 隐藏文件或系统文件未被统计\n");
     printf("  2. 权限问题导致某些文件无法访问\n");
     printf("  3. 符号链接或特殊文件类型\n");
   } else {
     printf("✗ 错误: 数据不一致 (计算值大于输入值)\n");
-    printf("calculated_total - input_total_size\n%.2f MB - %.2f MB = %.2f MB "
+    printf("计算总大小 - 输入总大小\n%.2f MB - %.2f MB = %.2f MB "
            "(%lld)\n",
            calculated_total / (1024.0 * 1024.0),
-           input_total_size / (1024.0 * 1024.0),
-           (calculated_total - input_total_size) / (1024.0 * 1024.0),
-           calculated_total - input_total_size);
+           result->total_input_size / (1024.0 * 1024.0),
+           (calculated_total - result->total_input_size) / (1024.0 * 1024.0),
+           calculated_total - result->total_input_size);
   }
+
+  printf("\n└─────────────────────────────────────────────────────────────┘\n");
 }
 
 // 释放内存
@@ -718,11 +716,8 @@ void run_grouping_test(char *paths[], int path_count) {
   GroupResult result = process_input_paths(
       paths, path_count, &total_scanned_size, &skipped_files_size);
 
-  // 输出结果
-  print_groups(&result);
-  print_statistics(&result, total_scanned_size, skipped_files_size);
-  validate_result(&result, result.total_input_size, total_scanned_size,
-                  skipped_files_size);
+  // 使用统一的综合输出函数
+  print_comprehensive_results(&result, total_scanned_size, skipped_files_size);
 
   // 释放内存
   free_group_result(&result);
