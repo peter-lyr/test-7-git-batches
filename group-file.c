@@ -732,7 +732,7 @@ int main() {
   printf("文件分组工具 - 开始处理预设路径\n\n");
 
   // 硬编码的路径数组 - 你可以在这里修改为你想要扫描的路径
-  char *input_paths[] = {"D:\\a"};
+  char *input_paths[] = {"C:\\Users\\ldp"};
 
   int path_count = sizeof(input_paths) / sizeof(input_paths[0]);
 
