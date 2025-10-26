@@ -680,8 +680,7 @@ void validate_result(const GroupResult *result, long long input_total_size,
   long long calculated_total = total_grouped_size + skipped_files_size;
   long long difference = input_total_size - calculated_total;
   double difference_percent =
-      input_total_size > 0 ? (double)difference / input_total_size * 100
-                           : 0;
+      input_total_size > 0 ? (double)difference / input_total_size * 100 : 0;
 
   char input_str[32], grouped_str[32], skipped_str[32], scanned_str[32],
       calc_str[32], diff_str[32];
@@ -796,18 +795,18 @@ int main() {
   // 硬编码的路径数组
   char *input_paths[] = {
       "C:\\Windows", // 这个会变
-      //
-      // "C:\\Users", // 这个会变
-      //
-      // "C:\\inetpub",
-      // "C:\\DumpStack.log",
-      // "C:\\OneDriveTemp",
-      // "C:\\PerfLogs",
-      // "C:\\ProgramFiles",
-      // "C:\\ProgramFiles(x86)",
-      // "C:\\ProgramData",
-      //
-      // "C:\\Recovery", // 这个会变
+                     //
+                     // "C:\\Users", // 这个会变
+                     //
+                     // "C:\\inetpub",
+                     // "C:\\DumpStack.log",
+                     // "C:\\OneDriveTemp",
+                     // "C:\\PerfLogs",
+                     // "C:\\ProgramFiles",
+                     // "C:\\ProgramFiles(x86)",
+                     // "C:\\ProgramData",
+                     //
+                     // "C:\\Recovery", // 这个会变
   };
 
   int path_count = sizeof(input_paths) / sizeof(input_paths[0]);
