@@ -794,7 +794,21 @@ int main() {
   printf("========================================\n\n");
 
   // 硬编码的路径数组
-  char *input_paths[] = {"C:\\Windows"};
+  char *input_paths[] = {
+      // "C:\\Windows", // 这个会变
+      //
+      "C:\\Users", // 这个会变
+      //
+      "C:\\inetpub",
+      "C:\\DumpStack.log",
+      "C:\\OneDriveTemp",
+      "C:\\PerfLogs",
+      "C:\\ProgramFiles",
+      "C:\\ProgramFiles(x86)",
+      "C:\\ProgramData",
+      //
+      // "C:\\Recovery", // 这个会变
+  };
 
   int path_count = sizeof(input_paths) / sizeof(input_paths[0]);
 
