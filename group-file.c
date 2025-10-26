@@ -646,8 +646,11 @@ void validate_result(const GroupResult *result, long long input_total_size,
     printf("  3. 符号链接或特殊文件类型\n");
   } else {
     printf("✗ 错误: 数据不一致 (计算值大于输入值)\n");
-    printf("calculated_total:%lld - input_total_size:%lld = %lld\n",
-           calculated_total, input_total_size,
+    printf("calculated_total - input_total_size\n%.2f MB - %.2f MB = %.2f MB "
+           "(%lld)\n",
+           calculated_total / (1024.0 * 1024.0),
+           input_total_size / (1024.0 * 1024.0),
+           (calculated_total - input_total_size) / (1024.0 * 1024.0),
            calculated_total - input_total_size);
   }
 }
@@ -732,7 +735,10 @@ int main() {
   printf("文件分组工具 - 开始处理预设路径\n\n");
 
   // 硬编码的路径数组 - 你可以在这里修改为你想要扫描的路径
-  char *input_paths[] = {"C:\\"};
+  // char *input_paths[] = {"C:\\Users"};
+  // char *input_paths[] = {"C:\\Program Files", "C:\\Program Files (x86)",
+  //                        "C:\\ProgramData", "C:\\Windows"};
+  char *input_paths[] = {"C:\\Windows"};
 
   int path_count = sizeof(input_paths) / sizeof(input_paths[0]);
 
