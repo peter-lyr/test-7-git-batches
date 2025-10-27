@@ -48,6 +48,51 @@ typedef struct {
   int depth;
 } DirectoryEntry;
 
+// 函数声明
+void *safe_malloc(size_t size);
+void *safe_realloc(void *ptr, size_t size);
+wchar_t *char_to_wchar(const char *str);
+char *wchar_to_char(const wchar_t *wstr);
+int safe_path_join(wchar_t *dest, size_t dest_size, const wchar_t *path1,
+                   const wchar_t *path2);
+void normalize_path(char *path);
+void format_size(long long size, char *buffer, size_t buffer_size);
+void draw_progress_bar(int current, int total, const char *prefix);
+long long calculate_directory_size_iterative(const wchar_t *wpath,
+                                             long long *total_scanned_size);
+int create_directory_recursive(const wchar_t *wpath);
+int copy_file_with_backup(const char *src_path, const char *backup_base_path);
+void collect_items_iterative(const wchar_t *wpath, FileItem *items,
+                             int *item_count, long long *total_scanned_size,
+                             long long *skipped_files_size,
+                             GroupResult *result);
+void process_input_path(const char *path, FileItem *items, int *item_count,
+                        long long *total_input_size,
+                        long long *total_scanned_size,
+                        long long *skipped_files_size, GroupResult *result);
+int compare_items(const void *a, const void *b);
+GroupResult group_files(FileItem *items, int item_count);
+void print_groups(const GroupResult *result);
+void print_skipped_files(const GroupResult *result);
+void print_statistics(const GroupResult *result, long long total_scanned_size,
+                      long long skipped_files_size);
+void validate_result(const GroupResult *result, long long input_total_size,
+                     long long total_scanned_size,
+                     long long skipped_files_size);
+void free_group_result(GroupResult *result);
+GroupResult process_input_paths(char *paths[], int path_count,
+                                long long *total_scanned_size,
+                                long long *skipped_files_size);
+void execute_git_commands(const GroupResult *result,
+                          const char *commit_info_file);
+void run_grouping_test_with_git(char *paths[], int path_count,
+                                const char *commit_info_file);
+void run_grouping_test(char *paths[], int path_count);
+char **get_git_status_paths(int *path_count);
+void free_git_status_paths(char **paths, int path_count);
+
+int update_gitignore_for_skipped_file(const char *skipped_file_path);
+
 // 安全的内存分配函数
 void *safe_malloc(size_t size) {
   void *ptr = malloc(size);
@@ -841,7 +886,7 @@ void print_groups(const GroupResult *result) {
   }
 }
 
-// 打印跳过大文件信息并进行备份
+// 打印跳过大文件信息并进行备份，同时更新.gitignore文件
 void print_skipped_files(const GroupResult *result) {
   if (result->skipped_count == 0) {
     printf("\n[信息] 没有跳过的大文件\n");
@@ -857,6 +902,7 @@ void print_skipped_files(const GroupResult *result) {
 
   long long total_skipped_size = 0;
   int backup_success_count = 0;
+  int gitignore_update_count = 0;
 
   // 获取当前工作目录作为Git仓库路径
   char git_repo_path[MAX_PATH_LENGTH];
@@ -885,6 +931,11 @@ void print_skipped_files(const GroupResult *result) {
     printf("    正在备份...\n");
     if (copy_file_with_backup(result->skipped_files[i].path, backup_base_dir)) {
       backup_success_count++;
+
+      // 新增：更新.gitignore文件
+      if (update_gitignore_for_skipped_file(result->skipped_files[i].path)) {
+        gitignore_update_count++;
+      }
     }
 
     // 每显示1个文件后空一行
@@ -899,13 +950,166 @@ void print_skipped_files(const GroupResult *result) {
   printf("\n跳过大文件总大小: %s\n", total_skipped_str);
   printf("备份成功: %d/%d 个文件\n", backup_success_count,
          result->skipped_count);
+  printf(".gitignore更新: %d/%d 个目录\n", gitignore_update_count,
+         backup_success_count);
 
   if (backup_success_count < result->skipped_count) {
     printf("[警告] 部分文件备份失败，请检查权限和磁盘空间\n");
   } else if (backup_success_count > 0) {
     printf("[成功] 所有大文件已备份到: %s-backup\n", git_repo_path);
   }
+
+  if (gitignore_update_count < backup_success_count) {
+    printf("[警告] 部分.gitignore文件更新失败\n");
+  } else if (gitignore_update_count > 0) {
+    printf("[成功] 所有相关.gitignore文件已更新\n");
+  }
 }
+
+// 新增：更新.gitignore文件以忽略备份的大文件
+int update_gitignore_for_skipped_file(const char *skipped_file_path) {
+  // 提取目录路径
+  char dir_path[MAX_PATH_LENGTH];
+  strcpy_s(dir_path, MAX_PATH_LENGTH, skipped_file_path);
+
+  // 找到最后一个路径分隔符
+  char *last_slash = strrchr(dir_path, '\\');
+  if (!last_slash) {
+    last_slash = strrchr(dir_path, '/');
+  }
+
+  if (!last_slash) {
+    printf("    [警告] 无法提取目录路径: %s\n", skipped_file_path);
+    return 0;
+  }
+
+  // 截断得到目录路径
+  *last_slash = '\0';
+
+  // 构造.gitignore文件路径
+  char gitignore_path[MAX_PATH_LENGTH];
+  snprintf(gitignore_path, MAX_PATH_LENGTH, "%s\\.gitignore", dir_path);
+
+  // 提取文件名（不含路径）
+  const char *filename = last_slash + 1;
+
+  // 生成备份文件的文件名（在原文件名基础上添加-merged后缀）
+  char backup_filename[MAX_PATH_LENGTH];
+  char file_base[MAX_PATH_LENGTH] = {0};
+  char file_ext[MAX_PATH_LENGTH] = {0};
+
+  // 分离文件名和扩展名
+  char *dot_pos = strrchr(filename, '.');
+  if (dot_pos && dot_pos != filename) { // 有扩展名且不是隐藏文件
+    size_t base_len = dot_pos - filename;
+    strncpy_s(file_base, MAX_PATH_LENGTH, filename, base_len);
+    file_base[base_len] = '\0';
+    strcpy_s(file_ext, MAX_PATH_LENGTH, dot_pos);
+  } else {
+    // 没有扩展名
+    strcpy_s(file_base, MAX_PATH_LENGTH, filename);
+    file_ext[0] = '\0';
+  }
+
+  // 生成备份文件名
+  snprintf(backup_filename, MAX_PATH_LENGTH, "%s-merged%s", file_base,
+           file_ext);
+
+  // 转换路径为宽字符用于Windows API
+  wchar_t *wgitignore_path = char_to_wchar(gitignore_path);
+  if (!wgitignore_path) {
+    printf("    [错误] 无法转换.gitignore路径编码: %s\n", gitignore_path);
+    return 0;
+  }
+
+  // 检查.gitignore文件是否存在
+  DWORD attr = GetFileAttributesW(wgitignore_path);
+  int file_exists =
+      (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
+
+  // 读取现有内容（如果文件存在）
+  char *existing_content = NULL;
+  size_t existing_size = 0;
+
+  if (file_exists) {
+    FILE *file = _wfopen(wgitignore_path, L"rb");
+    if (file) {
+      fseek(file, 0, SEEK_END);
+      long file_size = ftell(file);
+      fseek(file, 0, SEEK_SET);
+
+      if (file_size > 0 && file_size < 10 * 1024 * 1024) { // 限制文件大小10MB
+        existing_content = (char *)safe_malloc(file_size + 1);
+        size_t read_size = fread(existing_content, 1, file_size, file);
+        existing_content[read_size] = '\0';
+        existing_size = read_size;
+      }
+      fclose(file);
+    }
+  }
+
+  // 检查是否已经包含该备份文件名
+  int already_ignored = 0;
+  if (existing_content) {
+    // 简单的字符串匹配检查
+    char search_pattern[MAX_PATH_LENGTH * 2];
+    snprintf(search_pattern, MAX_PATH_LENGTH * 2, "\n%s", backup_filename);
+
+    if (strstr(existing_content, backup_filename) != NULL ||
+        strstr(existing_content, search_pattern) != NULL) {
+      already_ignored = 1;
+      printf("    [信息] 备份文件已在.gitignore中忽略: %s\n", backup_filename);
+    }
+  }
+
+  // 如果尚未忽略，则添加到.gitignore
+  if (!already_ignored) {
+    FILE *file =
+        _wfopen(wgitignore_path, L"ab"); // 追加模式，二进制写入避免编码问题
+    if (!file) {
+      // 尝试创建新文件
+      file = _wfopen(wgitignore_path, L"wb");
+    }
+
+    if (file) {
+      // 如果是新文件或空文件，添加UTF-8 BOM和适当的注释
+      if (!file_exists || (existing_size == 0)) {
+        // 写入UTF-8 BOM
+        unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+        fwrite(bom, 1, 3, file);
+
+        // 写入文件头注释
+        char header[] = "# 自动生成的.gitignore文件\n# 忽略备份的大文件\n\n";
+        fwrite(header, 1, strlen(header), file);
+      } else if (existing_size > 0) {
+        // 确保以换行符结尾
+        if (existing_content[existing_size - 1] != '\n') {
+          fputc('\n', file);
+        }
+      }
+
+      // 写入忽略条目
+      fprintf(file, "%s\n", backup_filename);
+      fclose(file);
+
+      printf("    [成功] 已更新.gitignore: %s -> %s\n", gitignore_path,
+             backup_filename);
+    } else {
+      printf("    [错误] 无法创建或打开.gitignore文件: %s\n", gitignore_path);
+      free(wgitignore_path);
+      if (existing_content)
+        free(existing_content);
+      return 0;
+    }
+  }
+
+  free(wgitignore_path);
+  if (existing_content)
+    free(existing_content);
+
+  return 1;
+}
+
 // 打印统计信息
 void print_statistics(const GroupResult *result, long long total_scanned_size,
                       long long skipped_files_size) {
