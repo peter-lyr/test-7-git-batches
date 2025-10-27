@@ -1,2 +1,9 @@
 process_input_paths返回的结构体里，增加跳过的大文件数组，返回后打印大文件信息
 需要修改的函数完整输出出来
+
+print_skipped_files时，每打印一个大文件路径，就把这个大文件备份一下：
+复制到新的路径，复制规则如下：
+如果大文件路径为E:\test-6-git-batches\中a\空 尾b1\大 文c20000\d0000.bin，
+它所在git仓库路径为E:\test-6-git-batches
+则新路径为E:\test-6-git-batches-backup\中a\空 尾b1\大 文c20000\d0000.bin
+需要修改的函数完整输出出来

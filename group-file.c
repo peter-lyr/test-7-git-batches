@@ -231,6 +231,151 @@ long long calculate_directory_size_iterative(const wchar_t *wpath,
   return total_size;
 }
 
+// 创建目录递归函数
+int create_directory_recursive(const wchar_t *wpath) {
+  wchar_t temp_path[MAX_PATH_LENGTH];
+  wchar_t *p = NULL;
+  size_t len = wcslen(wpath);
+
+  // 复制路径到临时缓冲区
+  wcscpy_s(temp_path, MAX_PATH_LENGTH, wpath);
+
+  // 逐级创建目录
+  for (p = temp_path + 1; *p; p++) {
+    if (*p == L'\\') {
+      *p = L'\0';
+
+      // 检查目录是否存在
+      DWORD attr = GetFileAttributesW(temp_path);
+      if (attr == INVALID_FILE_ATTRIBUTES) {
+        // 目录不存在，创建它
+        if (!CreateDirectoryW(temp_path, NULL)) {
+          DWORD error = GetLastError();
+          if (error != ERROR_ALREADY_EXISTS) {
+            wprintf(L"[错误] 无法创建目录: %s (错误: %lu)\n", temp_path, error);
+            return 0;
+          }
+        }
+      } else if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        wprintf(L"[错误] 路径不是目录: %s\n", temp_path);
+        return 0;
+      }
+
+      *p = L'\\';
+    }
+  }
+
+  // 创建最终目录
+  DWORD attr = GetFileAttributesW(temp_path);
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    if (!CreateDirectoryW(temp_path, NULL)) {
+      DWORD error = GetLastError();
+      if (error != ERROR_ALREADY_EXISTS) {
+        wprintf(L"[错误] 无法创建目录: %s (错误: %lu)\n", temp_path, error);
+        return 0;
+      }
+    }
+  }
+
+  return 1;
+}
+
+// 复制文件函数
+int copy_file_with_backup(const char *src_path, const char *backup_base_path) {
+  // 转换源路径为宽字符
+  wchar_t *wsrc_path = char_to_wchar(src_path);
+  if (!wsrc_path) {
+    printf("[错误] 无法转换源路径编码: %s\n", src_path);
+    return 0;
+  }
+
+  // 构造备份路径
+  char backup_path[MAX_PATH_LENGTH];
+
+  // 获取当前工作目录作为Git仓库路径
+  char git_repo_path[MAX_PATH_LENGTH];
+  if (!GetCurrentDirectoryA(MAX_PATH_LENGTH, git_repo_path)) {
+    printf("[错误] 无法获取当前工作目录\n");
+    free(wsrc_path);
+    return 0;
+  }
+
+  // 规范化路径
+  normalize_path(git_repo_path);
+
+  // 构造备份基础路径
+  char backup_dir[MAX_PATH_LENGTH];
+  snprintf(backup_dir, MAX_PATH_LENGTH, "%s-backup", git_repo_path);
+
+  // 计算相对路径
+  char relative_path[MAX_PATH_LENGTH];
+  if (strstr(src_path, git_repo_path) == src_path) {
+    // 源路径包含Git仓库路径
+    const char *relative_part = src_path + strlen(git_repo_path);
+    if (*relative_part == '\\' || *relative_part == '/') {
+      relative_part++;
+    }
+    snprintf(backup_path, MAX_PATH_LENGTH, "%s\\%s", backup_dir, relative_part);
+  } else {
+    // 源路径不包含Git仓库路径，直接放在备份目录下
+    const char *filename = strrchr(src_path, '\\');
+    if (!filename) {
+      filename = strrchr(src_path, '/');
+    }
+    if (filename) {
+      filename++;
+    } else {
+      filename = src_path;
+    }
+    snprintf(backup_path, MAX_PATH_LENGTH, "%s\\%s", backup_dir, filename);
+  }
+
+  // 规范化备份路径
+  normalize_path(backup_path);
+
+  // 转换备份路径为宽字符
+  wchar_t *wbackup_path = char_to_wchar(backup_path);
+  if (!wbackup_path) {
+    printf("[错误] 无法转换备份路径编码: %s\n", backup_path);
+    free(wsrc_path);
+    return 0;
+  }
+
+  // 创建目标目录
+  wchar_t backup_dir_wide[MAX_PATH_LENGTH];
+  wcscpy_s(backup_dir_wide, MAX_PATH_LENGTH, wbackup_path);
+
+  // 找到最后一个反斜杠
+  wchar_t *last_slash = wcsrchr(backup_dir_wide, L'\\');
+  if (last_slash) {
+    *last_slash = L'\0';
+
+    // 递归创建目录
+    if (!create_directory_recursive(backup_dir_wide)) {
+      printf("[错误] 无法创建备份目录结构\n");
+      free(wsrc_path);
+      free(wbackup_path);
+      return 0;
+    }
+  }
+
+  // 复制文件
+  printf("    备份到: %s\n", backup_path);
+
+  if (CopyFileW(wsrc_path, wbackup_path, FALSE)) {
+    printf("    [成功] 文件备份完成\n");
+    free(wsrc_path);
+    free(wbackup_path);
+    return 1;
+  } else {
+    DWORD error = GetLastError();
+    printf("    [失败] 文件备份失败 (错误: %lu)\n", error);
+    free(wsrc_path);
+    free(wbackup_path);
+    return 0;
+  }
+}
+
 // 迭代收集文件和文件夹信息
 void collect_items_iterative(const wchar_t *wpath, FileItem *items,
                              int *item_count, long long *total_scanned_size,
@@ -667,7 +812,7 @@ void print_groups(const GroupResult *result) {
   }
 }
 
-// 打印跳过大文件信息
+// 打印跳过大文件信息并进行备份
 void print_skipped_files(const GroupResult *result) {
   if (result->skipped_count == 0) {
     printf("\n[信息] 没有跳过的大文件\n");
@@ -682,6 +827,22 @@ void print_skipped_files(const GroupResult *result) {
          MAX_FILE_SIZE / (1024 * 1024));
 
   long long total_skipped_size = 0;
+  int backup_success_count = 0;
+
+  // 获取当前工作目录作为Git仓库路径
+  char git_repo_path[MAX_PATH_LENGTH];
+  if (!GetCurrentDirectoryA(MAX_PATH_LENGTH, git_repo_path)) {
+    printf("[错误] 无法获取当前工作目录\n");
+    return;
+  }
+
+  normalize_path(git_repo_path);
+  printf("Git仓库路径: %s\n", git_repo_path);
+
+  char backup_base_dir[MAX_PATH_LENGTH];
+  snprintf(backup_base_dir, MAX_PATH_LENGTH, "%s-backup", git_repo_path);
+  printf("备份基础路径: %s\n\n", backup_base_dir);
+
   for (int i = 0; i < result->skipped_count; i++) {
     total_skipped_size += result->skipped_files[i].size;
 
@@ -691,8 +852,14 @@ void print_skipped_files(const GroupResult *result) {
     printf("%3d. %s\n", i + 1, result->skipped_files[i].path);
     printf("     大小: %s\n", size_str);
 
-    // 每显示5个文件后空一行
-    if ((i + 1) % 5 == 0 && i != result->skipped_count - 1) {
+    // 备份文件
+    printf("    正在备份...\n");
+    if (copy_file_with_backup(result->skipped_files[i].path, backup_base_dir)) {
+      backup_success_count++;
+    }
+
+    // 每显示1个文件后空一行
+    if (i != result->skipped_count - 1) {
       printf("\n");
     }
   }
@@ -701,8 +868,15 @@ void print_skipped_files(const GroupResult *result) {
   format_size(total_skipped_size, total_skipped_str, sizeof(total_skipped_str));
 
   printf("\n跳过大文件总大小: %s\n", total_skipped_str);
-}
+  printf("备份成功: %d/%d 个文件\n", backup_success_count,
+         result->skipped_count);
 
+  if (backup_success_count < result->skipped_count) {
+    printf("[警告] 部分文件备份失败，请检查权限和磁盘空间\n");
+  } else if (backup_success_count > 0) {
+    printf("[成功] 所有大文件已备份到: %s-backup\n", git_repo_path);
+  }
+}
 // 打印统计信息
 void print_statistics(const GroupResult *result, long long total_scanned_size,
                       long long skipped_files_size) {
@@ -871,8 +1045,7 @@ GroupResult process_input_paths(char *paths[], int path_count,
 
   for (int i = 0; i < path_count; i++) {
     process_input_path(paths[i], items, &item_count, &total_input_size,
-                       total_scanned_size, skipped_files_size,
-                       &result); // 新增result参数
+                       total_scanned_size, skipped_files_size, &result);
   }
 
   printf("\n[完成] 扫描完成:\n");
