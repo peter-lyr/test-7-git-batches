@@ -289,9 +289,6 @@ int copy_file_with_backup(const char *src_path, const char *backup_base_path) {
     return 0;
   }
 
-  // 构造备份路径
-  char backup_path[MAX_PATH_LENGTH];
-
   // 获取当前工作目录作为Git仓库路径
   char git_repo_path[MAX_PATH_LENGTH];
   if (!GetCurrentDirectoryA(MAX_PATH_LENGTH, git_repo_path)) {
@@ -307,27 +304,59 @@ int copy_file_with_backup(const char *src_path, const char *backup_base_path) {
   char backup_dir[MAX_PATH_LENGTH];
   snprintf(backup_dir, MAX_PATH_LENGTH, "%s-backup", git_repo_path);
 
-  // 计算相对路径
-  char relative_path[MAX_PATH_LENGTH];
+  // 计算相对路径并构建完整的备份路径
+  char backup_path[MAX_PATH_LENGTH];
+
+  // 检查源路径是否在Git仓库路径下
   if (strstr(src_path, git_repo_path) == src_path) {
-    // 源路径包含Git仓库路径
+    // 源路径包含Git仓库路径，提取相对路径
     const char *relative_part = src_path + strlen(git_repo_path);
+
+    // 跳过路径分隔符
     if (*relative_part == '\\' || *relative_part == '/') {
       relative_part++;
     }
-    snprintf(backup_path, MAX_PATH_LENGTH, "%s\\%s", backup_dir, relative_part);
-  } else {
-    // 源路径不包含Git仓库路径，直接放在备份目录下
-    const char *filename = strrchr(src_path, '\\');
-    if (!filename) {
-      filename = strrchr(src_path, '/');
-    }
-    if (filename) {
-      filename++;
+
+    // 构建完整备份路径
+    if (strlen(relative_part) > 0) {
+      snprintf(backup_path, MAX_PATH_LENGTH, "%s\\%s", backup_dir,
+               relative_part);
     } else {
-      filename = src_path;
+      // 如果相对路径为空，说明就是仓库根目录下的文件
+      const char *filename = strrchr(src_path, '\\');
+      if (!filename) {
+        filename = strrchr(src_path, '/');
+      }
+      if (filename) {
+        filename++;
+      } else {
+        filename = src_path;
+      }
+      snprintf(backup_path, MAX_PATH_LENGTH, "%s\\%s", backup_dir, filename);
     }
-    snprintf(backup_path, MAX_PATH_LENGTH, "%s\\%s", backup_dir, filename);
+  } else {
+    // 源路径不在Git仓库路径下，使用完整路径但替换盘符等特殊字符
+    char safe_path[MAX_PATH_LENGTH];
+    strcpy_s(safe_path, MAX_PATH_LENGTH, src_path);
+
+    // 将冒号替换为下划线（处理盘符）
+    for (char *p = safe_path; *p; p++) {
+      if (*p == ':') {
+        *p = '_';
+      }
+      // 将路径分隔符统一为反斜杠
+      if (*p == '/') {
+        *p = '\\';
+      }
+    }
+
+    // 如果路径以反斜杠开头，去掉它
+    if (safe_path[0] == '\\') {
+      snprintf(backup_path, MAX_PATH_LENGTH, "%s\\%s", backup_dir,
+               safe_path + 1);
+    } else {
+      snprintf(backup_path, MAX_PATH_LENGTH, "%s\\%s", backup_dir, safe_path);
+    }
   }
 
   // 规范化备份路径
