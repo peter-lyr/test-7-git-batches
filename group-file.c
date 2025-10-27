@@ -950,11 +950,24 @@ char **get_git_status_paths(int *path_count) {
 
   while (fgets(line, sizeof(line), pipe) && *path_count < MAX_ITEMS) {
     // 跳过git状态前缀（通常是2-3个字符加空格）
+    // git status --porcelain 格式示例：
+    // " M README.md" 或 "MM file.txt" 或 "?? newfile.txt"
     char *path_start = line;
+
+    // 跳过状态字符（最多3个）
+    int status_chars = 0;
     while (*path_start &&
            (*path_start == ' ' || *path_start == 'M' || *path_start == 'A' ||
             *path_start == 'D' || *path_start == 'R' || *path_start == 'C' ||
             *path_start == 'U' || *path_start == '?')) {
+      path_start++;
+      status_chars++;
+      if (status_chars >= 3)
+        break; // 最多3个状态字符
+    }
+
+    // 跳过状态字符后的空格
+    while (*path_start == ' ') {
       path_start++;
     }
 
@@ -964,17 +977,52 @@ char **get_git_status_paths(int *path_count) {
       path_start[len - 1] = '\0';
     }
 
+    // 如果路径包含空格或被重命名，可能需要特殊处理
+    // 对于重命名的情况，格式是 "R  oldfile -> newfile"
+    if (strstr(path_start, " -> ") != NULL) {
+      // 这是重命名的情况，只取新文件名
+      char *arrow_pos = strstr(path_start, " -> ");
+      if (arrow_pos) {
+        path_start = arrow_pos + 4; // 跳过 " -> "
+      }
+    }
+
     // 如果路径不为空，则添加到列表中
     if (strlen(path_start) > 0) {
-      paths[*path_count] = (char *)safe_malloc(strlen(path_start) + 1);
-      strcpy(paths[*path_count], path_start);
-      (*path_count)++;
+      // 去除可能的前后空格
+      char *trimmed_path = path_start;
+      while (*trimmed_path == ' ')
+        trimmed_path++;
+
+      char *end = trimmed_path + strlen(trimmed_path) - 1;
+      while (end > trimmed_path && *end == ' ') {
+        *end = '\0';
+        end--;
+      }
+
+      if (strlen(trimmed_path) > 0) {
+        paths[*path_count] = (char *)safe_malloc(strlen(trimmed_path) + 1);
+        strcpy(paths[*path_count], trimmed_path);
+        (*path_count)++;
+
+        // 调试信息
+        printf("  [调试] 解析到文件: '%s'\n", trimmed_path);
+      }
     }
   }
 
   _pclose(pipe);
 
   printf("[Git] 找到 %d 个变更文件\n", *path_count);
+
+  // 打印所有找到的文件用于调试
+  if (*path_count > 0) {
+    printf("[Git] 文件列表:\n");
+    for (int i = 0; i < *path_count; i++) {
+      printf("  %d. '%s'\n", i + 1, paths[i]);
+    }
+  }
+
   return paths;
 }
 
@@ -1023,9 +1071,9 @@ int main(int argc, char *argv[]) {
     path_count = sizeof(backup_paths) / sizeof(backup_paths[0]);
   }
 
-  printf("扫描路径 (%d 个文件):\n", path_count);
+  printf("\n最终扫描路径 (%d 个文件):\n", path_count);
   for (int i = 0; i < (path_count > 10 ? 10 : path_count); i++) {
-    printf("  %d. %s\n", i + 1, input_paths[i]);
+    printf("  %d. '%s'\n", i + 1, input_paths[i]);
   }
   if (path_count > 10) {
     printf("  ... 还有 %d 个文件\n", path_count - 10);
