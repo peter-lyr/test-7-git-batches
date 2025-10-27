@@ -59,3 +59,9 @@ print_skipped_files时，每打印一个大文件路径，就把这个大文件�
 它所在git仓库路径为E:\test-6-git-batches
 则新路径为E:\test-6-git-batches-backup\中a\空 尾b1\大 文c20000\d0000.bin
 需要修改的函数完整输出出来
+
+备份错误
+文件"E:\test-7-git-batches-large-repo-4\a\中 空b1\空 c0001\空 d0007.bin"
+需要备份到"E:\test-7-git-batches-large-repo-4-backup\a\中 空b1\空 c0001\空 d0007.bin"
+而不是"E:\test-7-git-batches-large-repo-4-backup\空 d0007.bin"
+需要修改的函数完整输出出来
