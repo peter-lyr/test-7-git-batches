@@ -1257,7 +1257,7 @@ void run_grouping_test_with_git(char *paths[], int path_count,
                   skipped_files_size);
 
   // 执行Git操作
-  execute_git_commands(&result, commit_info_file);
+  // execute_git_commands(&result, commit_info_file);
 
   free_group_result(&result);
 }
