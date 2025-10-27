@@ -26,6 +26,11 @@ typedef struct {
 } FileGroup;
 
 typedef struct {
+  char path[MAX_PATH_LENGTH];
+  long long size;
+} SkippedFile;
+
+typedef struct {
   FileGroup *groups;
   int group_count;
   int groups_capacity;
@@ -33,6 +38,9 @@ typedef struct {
   long long skipped_size;
   int total_files;
   int total_directories;
+  SkippedFile *skipped_files; // 新增：跳过的大文件数组
+  int skipped_count;          // 新增：跳过大文件数量
+  int skipped_capacity;       // 新增：跳过大文件数组容量
 } GroupResult;
 
 typedef struct {
@@ -226,7 +234,8 @@ long long calculate_directory_size_iterative(const wchar_t *wpath,
 // 迭代收集文件和文件夹信息
 void collect_items_iterative(const wchar_t *wpath, FileItem *items,
                              int *item_count, long long *total_scanned_size,
-                             long long *skipped_files_size) {
+                             long long *skipped_files_size,
+                             GroupResult *result) { // 新增result参数
   DirectoryEntry *queue = (DirectoryEntry *)safe_malloc(sizeof(DirectoryEntry) *
                                                         MAX_DIRECTORY_QUEUE);
   int queue_front = 0, queue_rear = 0;
@@ -323,6 +332,32 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
             free(char_path);
           }
           *skipped_files_size += file_size.QuadPart;
+
+          // 新增：记录跳过大文件信息
+          if (result->skipped_count < MAX_ITEMS) {
+            if (result->skipped_count >= result->skipped_capacity) {
+              int new_capacity = result->skipped_capacity == 0
+                                     ? 10
+                                     : result->skipped_capacity * 2;
+              SkippedFile *new_skipped = (SkippedFile *)safe_realloc(
+                  result->skipped_files, sizeof(SkippedFile) * new_capacity);
+              result->skipped_files = new_skipped;
+              result->skipped_capacity = new_capacity;
+            }
+
+            char *char_path = wchar_to_char(full_path);
+            if (char_path) {
+              normalize_path(char_path);
+              if (strlen(char_path) < MAX_PATH_LENGTH - 1) {
+                strcpy_s(result->skipped_files[result->skipped_count].path,
+                         MAX_PATH_LENGTH, char_path);
+                result->skipped_files[result->skipped_count].size =
+                    file_size.QuadPart;
+                result->skipped_count++;
+              }
+              free(char_path);
+            }
+          }
         } else {
           char *char_path = wchar_to_char(full_path);
           if (char_path) {
@@ -353,7 +388,8 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
 void process_input_path(const char *path, FileItem *items, int *item_count,
                         long long *total_input_size,
                         long long *total_scanned_size,
-                        long long *skipped_files_size) {
+                        long long *skipped_files_size,
+                        GroupResult *result) { // 新增result参数
   wchar_t *wpath = char_to_wchar(path);
   if (!wpath) {
     printf("[警告] 无法转换路径编码: %s\n", path);
@@ -398,7 +434,7 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
     }
 
     collect_items_iterative(wpath, items, item_count, total_scanned_size,
-                            skipped_files_size);
+                            skipped_files_size, result); // 新增result参数
   } else {
     HANDLE hFile = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -420,6 +456,29 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
         format_size(file_size.QuadPart, size_str, sizeof(size_str));
         printf(" (%s)\n", size_str);
         *skipped_files_size += file_size.QuadPart;
+
+        // 新增：记录跳过大文件信息
+        if (result->skipped_count < MAX_ITEMS) {
+          if (result->skipped_count >= result->skipped_capacity) {
+            int new_capacity = result->skipped_capacity == 0
+                                   ? 10
+                                   : result->skipped_capacity * 2;
+            SkippedFile *new_skipped = (SkippedFile *)safe_realloc(
+                result->skipped_files, sizeof(SkippedFile) * new_capacity);
+            result->skipped_files = new_skipped;
+            result->skipped_capacity = new_capacity;
+          }
+
+          char normalized_path[MAX_PATH_LENGTH];
+          strcpy_s(normalized_path, MAX_PATH_LENGTH, path);
+          normalize_path(normalized_path);
+
+          strcpy_s(result->skipped_files[result->skipped_count].path,
+                   MAX_PATH_LENGTH, normalized_path);
+          result->skipped_files[result->skipped_count].size =
+              file_size.QuadPart;
+          result->skipped_count++;
+        }
       } else {
         if (*item_count < MAX_ITEMS) {
           if (strlen(path) < MAX_PATH_LENGTH - 1) {
@@ -608,6 +667,42 @@ void print_groups(const GroupResult *result) {
   }
 }
 
+// 打印跳过大文件信息
+void print_skipped_files(const GroupResult *result) {
+  if (result->skipped_count == 0) {
+    printf("\n[信息] 没有跳过的大文件\n");
+    return;
+  }
+
+  printf("\n========================================\n");
+  printf("          跳过的大文件列表\n");
+  printf("========================================\n\n");
+
+  printf("共跳过 %d 个大文件 (超过 %lld MB):\n\n", result->skipped_count,
+         MAX_FILE_SIZE / (1024 * 1024));
+
+  long long total_skipped_size = 0;
+  for (int i = 0; i < result->skipped_count; i++) {
+    total_skipped_size += result->skipped_files[i].size;
+
+    char size_str[32];
+    format_size(result->skipped_files[i].size, size_str, sizeof(size_str));
+
+    printf("%3d. %s\n", i + 1, result->skipped_files[i].path);
+    printf("     大小: %s\n", size_str);
+
+    // 每显示5个文件后空一行
+    if ((i + 1) % 5 == 0 && i != result->skipped_count - 1) {
+      printf("\n");
+    }
+  }
+
+  char total_skipped_str[32];
+  format_size(total_skipped_size, total_skipped_str, sizeof(total_skipped_str));
+
+  printf("\n跳过大文件总大小: %s\n", total_skipped_str);
+}
+
 // 打印统计信息
 void print_statistics(const GroupResult *result, long long total_scanned_size,
                       long long skipped_files_size) {
@@ -719,18 +814,28 @@ void validate_result(const GroupResult *result, long long input_total_size,
 
 // 释放内存
 void free_group_result(GroupResult *result) {
-  if (result && result->groups) {
-    for (int i = 0; i < result->groups_capacity; i++) {
-      if (result->groups[i].items) {
-        free(result->groups[i].items);
-        result->groups[i].items = NULL;
+  if (result) {
+    if (result->groups) {
+      for (int i = 0; i < result->groups_capacity; i++) {
+        if (result->groups[i].items) {
+          free(result->groups[i].items);
+          result->groups[i].items = NULL;
+        }
       }
+      free(result->groups);
+      result->groups = NULL;
     }
-    free(result->groups);
-    result->groups = NULL;
+
+    if (result->skipped_files) {
+      free(result->skipped_files);
+      result->skipped_files = NULL;
+    }
+
+    result->group_count = 0;
+    result->groups_capacity = 0;
+    result->skipped_count = 0;
+    result->skipped_capacity = 0;
   }
-  result->group_count = 0;
-  result->groups_capacity = 0;
 }
 
 // 处理输入路径并生成分组结果
@@ -744,11 +849,30 @@ GroupResult process_input_paths(char *paths[], int path_count,
   *total_scanned_size = 0;
   *skipped_files_size = 0;
 
+  // 初始化GroupResult
+  GroupResult result = {0};
+  result.groups_capacity = 10;
+  result.groups =
+      (FileGroup *)safe_malloc(sizeof(FileGroup) * result.groups_capacity);
+  result.skipped_capacity = 10;
+  result.skipped_files =
+      (SkippedFile *)safe_malloc(sizeof(SkippedFile) * result.skipped_capacity);
+  result.skipped_count = 0;
+
+  // 初始化groups数组
+  for (int i = 0; i < result.groups_capacity; i++) {
+    result.groups[i].items = (FileItem *)safe_malloc(sizeof(FileItem) * 10);
+    result.groups[i].count = 0;
+    result.groups[i].capacity = 10;
+    result.groups[i].total_size = 0;
+  }
+
   printf("[开始] 正在扫描文件和文件夹...\n\n");
 
   for (int i = 0; i < path_count; i++) {
     process_input_path(paths[i], items, &item_count, &total_input_size,
-                       total_scanned_size, skipped_files_size);
+                       total_scanned_size, skipped_files_size,
+                       &result); // 新增result参数
   }
 
   printf("\n[完成] 扫描完成:\n");
@@ -764,7 +888,14 @@ GroupResult process_input_paths(char *paths[], int path_count,
   printf("  跳过大文件: %s\n\n", skipped_size_str);
 
   printf("[处理] 正在进行分组...\n");
-  GroupResult result = group_files(items, item_count);
+
+  // 调用分组函数
+  GroupResult grouping_result = group_files(items, item_count);
+
+  // 复制分组结果
+  result.groups = grouping_result.groups;
+  result.group_count = grouping_result.group_count;
+  result.groups_capacity = grouping_result.groups_capacity;
   result.total_input_size = total_input_size;
   result.skipped_size = *skipped_files_size;
 
@@ -947,6 +1078,7 @@ void run_grouping_test_with_git(char *paths[], int path_count,
       paths, path_count, &total_scanned_size, &skipped_files_size);
 
   print_groups(&result);
+  print_skipped_files(&result);
   print_statistics(&result, total_scanned_size, skipped_files_size);
   validate_result(&result, result.total_input_size, total_scanned_size,
                   skipped_files_size);
