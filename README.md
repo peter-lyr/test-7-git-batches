@@ -12,7 +12,8 @@ commit-info.txt为exe命令的第一个参数
 
 对所有分组的所有大文件进行拆分，并把大文件备份一下：
 大文件文件名如a-name.bin
-在大文件所在目录下创建.gitignore文件，把大文件不带拓展名的文件名+"-merged."+大文件拓展名字符串（如a-name-merged.bin）加到.gitignore文件里去。
-在大文件所在目录下创建文件夹，命名为大文件文件名+"-split"后缀（如a-name.bin-split），里面放所有子文件，
+在大文件所在目录下创建.gitignore文件，把大文件不带拓展名的文件名+"-merged."+大文件拓展名字符串（如a-name-merged.bin）加到.gitignore文件里去，并把.gitignore文件加入到文件分组中去。
+在大文件所在目录下创建文件夹，命名为大文件文件名+"-split"后缀（如a-name.bin-split），把这个文件夹加入到文件分组中去，里面放所有子文件，
 每个子文件命名为大文件文件名+"-part0001"后缀（如a-name.bin-part0001），大小最大为MAX_FILE_SIZE，
-把大文件备份到新的地址，新地址在大文件所在绝对路径的基础上，只在git仓库所在目录文件夹名的基础上+"-backup"
+把大文件备份到新的地址，新地址在大文件所在绝对路径的基础上，只在git仓库所在目录文件夹名的基础上+"-backup"（如大文件绝对路径为E:\test-7-git-batches-large-repo\a\b4\c0000\d0000.bin的git仓库目录路径是E:\test-7-git-batches-large-repo，则把它复制到E:\test-7-git-batches-large-repo-backup\a\b4\c0000\d0000.bin）
+输出完整代码后检查整个代码是否完全满足上面的需求，如不满足则自行修改，直到全都满足为止后停止修改，并输出完整代码
