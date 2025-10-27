@@ -6,6 +6,7 @@
 
 #define MAX_PATH_LENGTH 4096
 #define MAX_GROUP_SIZE (100 * 1024 * 1024LL) // 100MB
+#define MAX_FILE_SIZE (50 * 1024 * 1024LL)   // 50MB
 #define MAX_ITEMS 100000
 #define MAX_DIRECTORY_QUEUE 10000
 
@@ -312,7 +313,7 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
         file_size.HighPart = find_data.nFileSizeHigh;
         *total_scanned_size += file_size.QuadPart;
 
-        if (file_size.QuadPart > MAX_GROUP_SIZE) {
+        if (file_size.QuadPart > MAX_FILE_SIZE) {
           char *char_path = wchar_to_char(full_path);
           if (char_path) {
             printf("[跳过] 大文件: %s", char_path);
@@ -413,7 +414,7 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
       *total_input_size += file_size.QuadPart;
       *total_scanned_size += file_size.QuadPart;
 
-      if (file_size.QuadPart > MAX_GROUP_SIZE) {
+      if (file_size.QuadPart > MAX_FILE_SIZE) {
         printf("[跳过] 大文件: %s", path);
         char size_str[32];
         format_size(file_size.QuadPart, size_str, sizeof(size_str));
@@ -435,6 +436,8 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
           }
         }
       }
+    } else {
+      printf("[警告] 无法打开文件 %s (错误: %lu)\n", path, GetLastError());
     }
   }
 
@@ -769,7 +772,7 @@ GroupResult process_input_paths(char *paths[], int path_count,
   return result;
 }
 
-// 执行Git命令的函数
+// 修改命令执行部分，使用宽字符版本的命令
 void execute_git_commands(const GroupResult *result,
                           const char *commit_info_file) {
   printf("\n========================================\n");
@@ -782,7 +785,7 @@ void execute_git_commands(const GroupResult *result,
   }
 
   // 检查当前目录是否是Git仓库
-  if (system("git status >nul 2>&1") != 0) {
+  if (_wsystem(L"git status >nul 2>&1") != 0) {
     printf("[错误] 当前目录不是Git仓库或git命令不可用\n");
     return;
   }
@@ -791,84 +794,119 @@ void execute_git_commands(const GroupResult *result,
   int success_commands = 0;
   int total_paths_processed = 0;
 
-  // 首先处理所有分组的git add
   for (int group_idx = 0; group_idx < result->group_count; group_idx++) {
     const FileGroup *group = &result->groups[group_idx];
 
     printf("\n处理分组 %d/%d (包含 %d 个项):\n", group_idx + 1,
            result->group_count, group->count);
 
-    char command_buffer[32768] = "git add"; // Windows命令长度限制约32767字符
-    size_t buffer_len = strlen(command_buffer);
+    // 使用宽字符构建命令
+    wchar_t command_buffer[32768] = L"git add";
+    size_t buffer_len = wcslen(command_buffer);
     int current_command_path_count = 0;
 
     for (int item_idx = 0; item_idx < group->count; item_idx++) {
       const FileItem *item = &group->items[item_idx];
 
-      // 构造带引号的路径
-      char quoted_path[MAX_PATH_LENGTH + 10]; // 额外空间用于引号和空格
-      snprintf(quoted_path, sizeof(quoted_path), " \"%s\"", item->path);
-      size_t quoted_path_len = strlen(quoted_path);
+      // 将UTF-8路径转换为宽字符
+      wchar_t *wpath = char_to_wchar(item->path);
+      if (!wpath) {
+        printf("    [警告] 无法转换路径编码: %s\n", item->path);
+        continue;
+      }
+
+      // 构造带引号的宽字符路径
+      wchar_t quoted_path[MAX_PATH_LENGTH + 10];
+      if (wcschr(wpath, L' ') != NULL || wcschr(wpath, L'&') != NULL ||
+          wcschr(wpath, L'|') != NULL || wcschr(wpath, L'>') != NULL ||
+          wcschr(wpath, L'<') != NULL || wcschr(wpath, L'^') != NULL) {
+        _snwprintf_s(quoted_path, _countof(quoted_path), _TRUNCATE, L" \"%s\"",
+                     wpath);
+      } else {
+        _snwprintf_s(quoted_path, _countof(quoted_path), _TRUNCATE, L" %s",
+                     wpath);
+      }
+
+      size_t quoted_path_len = wcslen(quoted_path);
 
       // 检查是否超过命令长度限制
       if (buffer_len + quoted_path_len >= 4000) {
-        // 执行当前命令
         printf("  执行命令: git add [%d个路径]\n", current_command_path_count);
 
-        int ret = system(command_buffer);
+        int ret = _wsystem(command_buffer);
         total_commands++;
         if (ret == 0) {
           success_commands++;
           printf("    [成功] 命令执行成功\n");
         } else {
           printf("    [失败] 命令返回代码: %d\n", ret);
+          // 打印失败的命令用于调试
+          char *cmd_str = wchar_to_char(command_buffer);
+          if (cmd_str) {
+            printf("    失败命令: %s\n", cmd_str);
+            free(cmd_str);
+          }
         }
 
         // 重置命令缓冲区和计数器
-        strcpy(command_buffer, "git add");
-        buffer_len = strlen(command_buffer);
+        wcscpy_s(command_buffer, _countof(command_buffer), L"git add");
+        buffer_len = wcslen(command_buffer);
         total_paths_processed += current_command_path_count;
         current_command_path_count = 0;
       }
 
       // 添加路径到命令
-      if (buffer_len + quoted_path_len < sizeof(command_buffer)) {
-        strcat(command_buffer, quoted_path);
+      if (buffer_len + quoted_path_len < _countof(command_buffer)) {
+        wcscat_s(command_buffer, _countof(command_buffer), quoted_path);
         buffer_len += quoted_path_len;
         current_command_path_count++;
       }
+
+      free(wpath);
     }
 
     // 执行分组最后一个命令（如果有内容）
     if (current_command_path_count > 0) {
       printf("  执行命令: git add [%d个路径]\n", current_command_path_count);
 
-      int ret = system(command_buffer);
+      int ret = _wsystem(command_buffer);
       total_commands++;
       if (ret == 0) {
         success_commands++;
         printf("    [成功] 命令执行成功\n");
       } else {
         printf("    [失败] 命令返回代码: %d\n", ret);
+        // 打印失败的命令用于调试
+        char *cmd_str = wchar_to_char(command_buffer);
+        if (cmd_str) {
+          printf("    失败命令: %s\n", cmd_str);
+          free(cmd_str);
+        }
       }
       total_paths_processed += current_command_path_count;
     }
 
-    // 执行git commit
+    // 执行git commit（使用宽字符）
     if (commit_info_file && commit_info_file[0] != '\0') {
       printf("\n执行提交: git commit -F %s\n", commit_info_file);
 
-      char commit_command[512];
-      snprintf(commit_command, sizeof(commit_command), "git commit -F \"%s\"",
-               commit_info_file);
+      wchar_t commit_command[512];
+      wchar_t *wcommit_file = char_to_wchar(commit_info_file);
+      if (wcommit_file) {
+        _snwprintf_s(commit_command, _countof(commit_command), _TRUNCATE,
+                     L"git commit -F \"%s\"", wcommit_file);
 
-      int ret = system(commit_command);
-      total_commands++;
-      if (ret == 0) {
-        success_commands++;
-        printf("[成功] 提交完成\n");
+        int ret = _wsystem(commit_command);
+        total_commands++;
+        if (ret == 0) {
+          success_commands++;
+          printf("[成功] 提交完成\n");
+        } else {
+          printf("[失败] 提交命令返回代码: %d\n", ret);
+        }
+        free(wcommit_file);
       } else {
-        printf("[失败] 提交命令返回代码: %d\n", ret);
+        printf("[错误] 无法转换提交信息文件路径编码\n");
       }
     } else {
       printf("\n[警告] 未提供提交信息文件，跳过提交步骤\n");
@@ -876,7 +914,7 @@ void execute_git_commands(const GroupResult *result,
 
     // 执行git push
     printf("\n执行推送: git push\n");
-    int ret = system("git push");
+    int ret = _wsystem(L"git push");
     total_commands++;
     if (ret == 0) {
       success_commands++;
@@ -934,7 +972,7 @@ void run_grouping_test(char *paths[], int path_count) {
   free_group_result(&result);
 }
 
-// 从git status --porcelain获取文件路径
+// 从git status --porcelain获取文件路径（修复版）
 char **get_git_status_paths(int *path_count) {
   printf("[Git] 正在执行 git status --porcelain...\n");
 
@@ -949,9 +987,13 @@ char **get_git_status_paths(int *path_count) {
   char line[MAX_PATH_LENGTH * 2];
 
   while (fgets(line, sizeof(line), pipe) && *path_count < MAX_ITEMS) {
-    // 跳过git状态前缀（通常是2-3个字符加空格）
     // git status --porcelain 格式示例：
-    // " M README.md" 或 "MM file.txt" 或 "?? newfile.txt"
+    // " M README.md"
+    // "MM file.txt"
+    // "?? newfile.txt"
+    // " R oldfile.txt -> newfile.txt"
+    // "?? \"file with spaces.txt\""
+
     char *path_start = line;
 
     // 跳过状态字符（最多3个）
@@ -959,11 +1001,11 @@ char **get_git_status_paths(int *path_count) {
     while (*path_start &&
            (*path_start == ' ' || *path_start == 'M' || *path_start == 'A' ||
             *path_start == 'D' || *path_start == 'R' || *path_start == 'C' ||
-            *path_start == 'U' || *path_start == '?')) {
+            *path_start == 'U' || *path_start == '?' || *path_start == '!')) {
       path_start++;
       status_chars++;
       if (status_chars >= 3)
-        break; // 最多3个状态字符
+        break;
     }
 
     // 跳过状态字符后的空格
@@ -975,39 +1017,50 @@ char **get_git_status_paths(int *path_count) {
     size_t len = strlen(path_start);
     if (len > 0 && path_start[len - 1] == '\n') {
       path_start[len - 1] = '\0';
+      len--;
     }
 
-    // 如果路径包含空格或被重命名，可能需要特殊处理
-    // 对于重命名的情况，格式是 "R  oldfile -> newfile"
-    if (strstr(path_start, " -> ") != NULL) {
-      // 这是重命名的情况，只取新文件名
-      char *arrow_pos = strstr(path_start, " -> ");
-      if (arrow_pos) {
-        path_start = arrow_pos + 4; // 跳过 " -> "
-      }
+    // 处理重命名的情况 "R  oldfile -> newfile"
+    char *arrow_pos = strstr(path_start, " -> ");
+    if (arrow_pos) {
+      path_start = arrow_pos + 4; // 跳过 " -> "
+    }
+
+    // 现在处理路径，可能被引号包围
+    char *final_path = path_start;
+
+    // 如果路径以引号开始和结束，去除引号
+    if (len >= 2 && path_start[0] == '"' && path_start[len - 1] == '"') {
+      path_start[len - 1] = '\0';  // 去除结尾引号
+      final_path = path_start + 1; // 跳过开头引号
+    }
+
+    // 去除可能的前后空格
+    char *trimmed_path = final_path;
+    while (*trimmed_path == ' ') {
+      trimmed_path++;
+    }
+
+    char *end = trimmed_path + strlen(trimmed_path) - 1;
+    while (end > trimmed_path && *end == ' ') {
+      *end = '\0';
+      end--;
     }
 
     // 如果路径不为空，则添加到列表中
-    if (strlen(path_start) > 0) {
-      // 去除可能的前后空格
-      char *trimmed_path = path_start;
-      while (*trimmed_path == ' ')
-        trimmed_path++;
-
-      char *end = trimmed_path + strlen(trimmed_path) - 1;
-      while (end > trimmed_path && *end == ' ') {
-        *end = '\0';
-        end--;
+    if (strlen(trimmed_path) > 0) {
+      // 检查路径是否存在（可选，用于调试）
+      DWORD attr = GetFileAttributesA(trimmed_path);
+      if (attr == INVALID_FILE_ATTRIBUTES) {
+        printf("  [警告] 路径不存在或无法访问: '%s'\n", trimmed_path);
+        // 继续添加，让后续处理决定如何处理
       }
 
-      if (strlen(trimmed_path) > 0) {
-        paths[*path_count] = (char *)safe_malloc(strlen(trimmed_path) + 1);
-        strcpy(paths[*path_count], trimmed_path);
-        (*path_count)++;
+      paths[*path_count] = (char *)safe_malloc(strlen(trimmed_path) + 1);
+      strcpy(paths[*path_count], trimmed_path);
+      (*path_count)++;
 
-        // 调试信息
-        printf("  [调试] 解析到文件: '%s'\n", trimmed_path);
-      }
+      printf("  [调试] 解析到文件: '%s'\n", trimmed_path);
     }
   }
 
