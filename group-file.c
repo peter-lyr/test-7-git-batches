@@ -886,7 +886,68 @@ void print_groups(const GroupResult *result) {
   }
 }
 
-// 新增：拆分大文件的函数
+// 新增：清空目录内容的函数
+int clear_directory(const wchar_t *wdir_path) {
+  printf("    正在清空目录内容...\n");
+
+  wchar_t search_path[MAX_PATH_LENGTH];
+  if (!safe_path_join(search_path, MAX_PATH_LENGTH, wdir_path, L"*")) {
+    printf("    [错误] 无法构造搜索路径\n");
+    return 0;
+  }
+
+  WIN32_FIND_DATAW find_data;
+  HANDLE hFind = FindFirstFileW(search_path, &find_data);
+
+  if (hFind == INVALID_HANDLE_VALUE) {
+    // 目录可能为空，这不算错误
+    return 1;
+  }
+
+  int success = 1;
+
+  do {
+    if (wcscmp(find_data.cFileName, L".") == 0 ||
+        wcscmp(find_data.cFileName, L"..") == 0) {
+      continue;
+    }
+
+    wchar_t full_path[MAX_PATH_LENGTH];
+    if (!safe_path_join(full_path, MAX_PATH_LENGTH, wdir_path,
+                        find_data.cFileName)) {
+      success = 0;
+      continue;
+    }
+
+    if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      // 递归删除子目录
+      if (!clear_directory(full_path)) {
+        success = 0;
+      }
+
+      // 删除空目录
+      if (!RemoveDirectoryW(full_path)) {
+        DWORD error = GetLastError();
+        printf("    [警告] 无法删除目录 %ls (错误: %lu)\n", find_data.cFileName,
+               error);
+        success = 0;
+      }
+    } else {
+      // 删除文件
+      if (!DeleteFileW(full_path)) {
+        DWORD error = GetLastError();
+        printf("    [警告] 无法删除文件 %ls (错误: %lu)\n", find_data.cFileName,
+               error);
+        success = 0;
+      }
+    }
+  } while (FindNextFileW(hFind, &find_data));
+
+  FindClose(hFind);
+  return success;
+}
+
+// 修改：拆分大文件的函数，添加清空目录逻辑
 int split_large_file(const char *file_path, const char *split_dir,
                      long long file_size) {
   printf("    正在拆分大文件...\n");
@@ -904,12 +965,24 @@ int split_large_file(const char *file_path, const char *split_dir,
     return 0;
   }
 
-  // 创建拆分目录
-  if (!create_directory_recursive(wsplit_dir)) {
-    printf("    [错误] 无法创建拆分目录\n");
-    free(wfile_path);
-    free(wsplit_dir);
-    return 0;
+  // 检查拆分目录是否存在
+  DWORD dir_attr = GetFileAttributesW(wsplit_dir);
+  if (dir_attr != INVALID_FILE_ATTRIBUTES &&
+      (dir_attr & FILE_ATTRIBUTE_DIRECTORY)) {
+    printf("    拆分目录已存在，正在清空...\n");
+    if (!clear_directory(wsplit_dir)) {
+      printf("    [警告] 清空拆分目录失败，继续尝试拆分...\n");
+    } else {
+      printf("    [成功] 拆分目录已清空\n");
+    }
+  } else {
+    // 创建拆分目录
+    if (!create_directory_recursive(wsplit_dir)) {
+      printf("    [错误] 无法创建拆分目录\n");
+      free(wfile_path);
+      free(wsplit_dir);
+      return 0;
+    }
   }
 
   // 打开源文件
@@ -1041,7 +1114,7 @@ int split_large_file(const char *file_path, const char *split_dir,
   }
 }
 
-// 新增：检查拆分目录是否完整
+// 修改：检查拆分目录是否完整的函数，现在只检查目录存在性
 int is_split_complete(const char *file_path, const char *split_dir,
                       long long file_size) {
   // 如果拆分目录不存在，需要拆分
@@ -1056,84 +1129,12 @@ int is_split_complete(const char *file_path, const char *split_dir,
     return 0; // 目录不存在，需要拆分
   }
 
-  // 检查所有部分文件的总大小是否匹配原文件
-  char search_pattern[MAX_PATH_LENGTH];
-  const char *filename = strrchr(file_path, '\\');
-  if (!filename) {
-    filename = strrchr(file_path, '/');
-  }
-  if (filename) {
-    filename++;
-  } else {
-    filename = file_path;
-  }
-
-  // 分离文件名和扩展名
-  char file_base[MAX_PATH_LENGTH] = {0};
-  char file_ext[MAX_PATH_LENGTH] = {0};
-  char *dot_pos = strrchr(filename, '.');
-
-  if (dot_pos && dot_pos != filename) {
-    size_t base_len = dot_pos - filename;
-    strncpy_s(file_base, MAX_PATH_LENGTH, filename, base_len);
-    file_base[base_len] = '\0';
-    strcpy_s(file_ext, MAX_PATH_LENGTH, dot_pos);
-  } else {
-    strcpy_s(file_base, MAX_PATH_LENGTH, filename);
-    file_ext[0] = '\0';
-  }
-
-  snprintf(search_pattern, MAX_PATH_LENGTH, "%s\\%s-part*%s", split_dir,
-           file_base, file_ext);
-
-  wchar_t *wsearch_pattern = char_to_wchar(search_pattern);
-  if (!wsearch_pattern)
-    return 0;
-
-  WIN32_FIND_DATAW find_data;
-  HANDLE hFind = FindFirstFileW(wsearch_pattern, &find_data);
-  free(wsearch_pattern);
-
-  if (hFind == INVALID_HANDLE_VALUE) {
-    return 0; // 没有找到部分文件，需要拆分
-  }
-
-  long long total_split_size = 0;
-
-  do {
-    if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-      wchar_t part_path[MAX_PATH_LENGTH];
-      wchar_t *wsplit_dir_wide = char_to_wchar(split_dir);
-      if (wsplit_dir_wide) {
-        safe_path_join(part_path, MAX_PATH_LENGTH, wsplit_dir_wide,
-                       find_data.cFileName);
-        free(wsplit_dir_wide);
-
-        HANDLE hFile =
-            CreateFileW(part_path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-          DWORD sizeLow, sizeHigh;
-          sizeLow = GetFileSize(hFile, &sizeHigh);
-          CloseHandle(hFile);
-
-          ULARGE_INTEGER part_size;
-          part_size.LowPart = sizeLow;
-          part_size.HighPart = sizeHigh;
-          total_split_size += part_size.QuadPart;
-        }
-      }
-    }
-  } while (FindNextFileW(hFind, &find_data));
-
-  FindClose(hFind);
-
-  // 如果总大小不匹配，需要重新拆分
-  return (total_split_size == file_size);
+  // 目录存在，但我们总是重新拆分以确保完整性
+  return 0;
 }
 
-// 修改：print_skipped_files函数，添加拆分功能
-void print_skipped_files(GroupResult *result) { // 修改为非常量指针
+// 修改：print_skipped_files函数中的拆分逻辑
+void print_skipped_files(GroupResult *result) {
   if (result->skipped_count == 0) {
     printf("\n[信息] 没有跳过的大文件\n");
     return;
@@ -1187,7 +1188,7 @@ void print_skipped_files(GroupResult *result) { // 修改为非常量指针
       snprintf(split_dir, MAX_PATH_LENGTH, "%s-split",
                result->skipped_files[i].path);
 
-      // 检查是否需要拆分
+      // 检查是否需要拆分（现在总是重新拆分以确保完整性）
       if (!is_split_complete(result->skipped_files[i].path, split_dir,
                              result->skipped_files[i].size)) {
         printf("    开始拆分大文件...\n");
