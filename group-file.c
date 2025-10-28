@@ -1143,7 +1143,7 @@ int split_large_file(const char *file_path, const char *split_dir,
   }
 }
 
-// 新增：检查拆分目录是否完整的函数（改进版）
+// 修改：改进拆分完整性检查的调试信息
 int is_split_complete(const char *file_path, const char *split_dir,
                       long long file_size) {
   // 转换路径为宽字符
@@ -1154,6 +1154,7 @@ int is_split_complete(const char *file_path, const char *split_dir,
   // 检查拆分目录是否存在
   DWORD attr = GetFileAttributesW(wsplit_dir);
   if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+    printf("    拆分目录不存在: %s\n", split_dir);
     free(wsplit_dir);
     return 0; // 目录不存在，需要拆分
   }
@@ -1185,6 +1186,14 @@ int is_split_complete(const char *file_path, const char *split_dir,
         part_size.HighPart = find_data.nFileSizeHigh;
         split_total_size += part_size.QuadPart;
         part_count++;
+
+        // 调试信息：显示找到的拆分文件
+        char *part_filename = wchar_to_char(find_data.cFileName);
+        if (part_filename) {
+          printf("      找到拆分文件: %s (%llu bytes)\n", part_filename,
+                 part_size.QuadPart);
+          free(part_filename);
+        }
       }
     } while (FindNextFileW(hFind, &find_data));
 
@@ -1195,16 +1204,19 @@ int is_split_complete(const char *file_path, const char *split_dir,
 
   // 检查拆分是否完整
   if (part_count == 0) {
+    printf("    拆分目录为空: %s\n", split_dir);
     return 0; // 目录为空，需要拆分
   }
 
   long long size_difference = llabs(split_total_size - file_size);
   double difference_ratio = (double)size_difference / file_size;
 
-  printf("    拆分检查: 原文件 %lld bytes, 拆分文件 %lld bytes, 差异 %.4f%%\n",
-         file_size, split_total_size, difference_ratio * 100);
+  printf("    拆分检查: 原文件 %lld bytes, 拆分文件 %lld bytes (共%d个文件), "
+         "差异 %.4f%%\n",
+         file_size, split_total_size, part_count, difference_ratio * 100);
 
-  if (size_difference > 0) {
+  // 允许微小的差异（可能是由于文件系统或计算误差）
+  if (size_difference > 1024) { // 允许1KB以内的差异
     printf("    文件大小不匹配，需要重新拆分\n");
     return 0;
   }
@@ -1213,6 +1225,7 @@ int is_split_complete(const char *file_path, const char *split_dir,
   return 1;
 }
 
+// 修改：修复备份和.gitignore更新计数的逻辑
 AdditionalFiles print_skipped_files(GroupResult *result) {
   AdditionalFiles additional = {0};
   additional.gitignore_files = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
@@ -1234,6 +1247,8 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
   int backup_success_count = 0;
   int gitignore_update_count = 0;
   int split_success_count = 0;
+  int backup_attempt_count = 0;    // 新增：实际尝试备份的文件数
+  int gitignore_attempt_count = 0; // 新增：实际尝试更新.gitignore的目录数
 
   // 获取当前工作目录作为Git仓库路径
   char git_repo_path[MAX_PATH_LENGTH];
@@ -1277,8 +1292,10 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
         split_success_count++;
         printf("    [成功] 大文件拆分完成\n");
 
-        // 拆分完成后进行备份
+        // 拆分完成后进行备份（只有拆分成功才需要备份原文件）
         printf("    正在备份原文件...\n");
+        backup_attempt_count++; // 记录尝试备份的次数
+
         if (copy_file_with_backup(result->skipped_files[i].path,
                                   backup_base_dir)) {
           backup_success_count++;
@@ -1295,7 +1312,8 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
           additional.split_count++;
         }
 
-        // 更新.gitignore文件以忽略原文件
+        // 更新.gitignore文件以忽略原文件（只有备份成功才需要更新.gitignore）
+        gitignore_attempt_count++; // 记录尝试更新.gitignore的次数
         if (update_gitignore_for_skipped_file(result->skipped_files[i].path)) {
           gitignore_update_count++;
 
@@ -1344,15 +1362,26 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
       if (attr != INVALID_FILE_ATTRIBUTES &&
           !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
         printf("    原文件仍然存在，进行备份...\n");
+        backup_attempt_count++; // 记录尝试备份的次数
+
         if (copy_file_with_backup(result->skipped_files[i].path,
                                   backup_base_dir)) {
           backup_success_count++;
           printf("    [成功] 原文件备份完成\n");
+
+          // 只有备份成功才需要更新.gitignore
+          gitignore_attempt_count++; // 记录尝试更新.gitignore的次数
+          if (update_gitignore_for_skipped_file(
+                  result->skipped_files[i].path)) {
+            gitignore_update_count++;
+          }
         } else {
           printf("    [警告] 原文件备份失败\n");
         }
       } else {
         printf("    [信息] 原文件已不存在，无需备份\n");
+        // 原文件不存在，不需要备份，但可能仍然需要检查.gitignore
+        // 这里可以选择性地检查.gitignore是否需要更新
       }
     }
 
@@ -1368,27 +1397,45 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
   printf("\n跳过大文件总大小: %s\n", total_skipped_str);
   printf("需要拆分的文件: %d/%d 个\n", split_success_count,
          result->skipped_count);
-  printf("备份成功: %d/%d 个文件\n", backup_success_count,
-         result->skipped_count);
-  printf(".gitignore更新: %d/%d 个目录\n", gitignore_update_count,
-         result->skipped_count);
 
-  if (backup_success_count < result->skipped_count) {
+  // 使用实际尝试备份的数量作为分母
+  if (backup_attempt_count > 0) {
+    printf("备份成功: %d/%d 个文件\n", backup_success_count,
+           backup_attempt_count);
+  } else {
+    printf("备份成功: 0/0 个文件 (无需备份)\n");
+  }
+
+  // 使用实际尝试更新.gitignore的数量作为分母
+  if (gitignore_attempt_count > 0) {
+    printf(".gitignore更新: %d/%d 个目录\n", gitignore_update_count,
+           gitignore_attempt_count);
+  } else {
+    printf(".gitignore更新: 0/0 个目录 (无需更新)\n");
+  }
+
+  // 修复警告信息的逻辑
+  if (backup_attempt_count > 0 && backup_success_count < backup_attempt_count) {
     printf("[警告] 部分文件备份失败，请检查权限和磁盘空间\n");
   } else if (backup_success_count > 0) {
     printf("[成功] 所有需要备份的大文件已备份到: %s-backup\n", git_repo_path);
+  } else {
+    printf("[信息] 没有需要备份的文件\n");
   }
 
   if (split_success_count < result->skipped_count) {
     printf("[警告] 部分大文件拆分失败\n");
-  } else if (split_success_count > 0) {
+  } else {
     printf("[成功] 所有大文件拆分处理完成\n");
   }
 
-  if (gitignore_update_count < result->skipped_count) {
+  if (gitignore_attempt_count > 0 &&
+      gitignore_update_count < gitignore_attempt_count) {
     printf("[警告] 部分.gitignore文件更新失败\n");
   } else if (gitignore_update_count > 0) {
     printf("[成功] 所有相关.gitignore文件已更新\n");
+  } else {
+    printf("[信息] 没有需要更新的.gitignore文件\n");
   }
 
   return additional;
@@ -1604,7 +1651,7 @@ void collect_split_directory_files(const wchar_t *wdir_path, FileItem *items,
   FindClose(hFind);
 }
 
-// 新增：更新.gitignore文件以忽略备份的大文件
+// 修改：改进.gitignore更新逻辑，避免重复添加
 int update_gitignore_for_skipped_file(const char *skipped_file_path) {
   // 提取目录路径
   char dir_path[MAX_PATH_LENGTH];
@@ -1686,18 +1733,42 @@ int update_gitignore_for_skipped_file(const char *skipped_file_path) {
     }
   }
 
-  // 检查是否已经包含该备份文件名
+  // 改进的检查逻辑：使用更精确的匹配
   int already_ignored = 0;
   if (existing_content) {
-    // 简单的字符串匹配检查
-    char search_pattern[MAX_PATH_LENGTH * 2];
-    snprintf(search_pattern, MAX_PATH_LENGTH * 2, "\n%s", backup_filename);
+    // 逐行检查，避免部分匹配
+    char *content_copy = (char *)safe_malloc(existing_size + 1);
+    strcpy_s(content_copy, existing_size + 1, existing_content);
 
-    if (strstr(existing_content, backup_filename) != NULL ||
-        strstr(existing_content, search_pattern) != NULL) {
-      already_ignored = 1;
-      printf("    [信息] 备份文件已在.gitignore中忽略: %s\n", backup_filename);
+    char *line = strtok(content_copy, "\n");
+    while (line != NULL) {
+      // 跳过空行和注释行
+      if (strlen(line) > 0 && line[0] != '#') {
+        // 去除行首尾的空格
+        char *trimmed_line = line;
+        while (*trimmed_line == ' ' || *trimmed_line == '\t') {
+          trimmed_line++;
+        }
+
+        char *end = trimmed_line + strlen(trimmed_line) - 1;
+        while (end > trimmed_line &&
+               (*end == ' ' || *end == '\t' || *end == '\r')) {
+          *end = '\0';
+          end--;
+        }
+
+        // 精确匹配
+        if (strcmp(trimmed_line, backup_filename) == 0) {
+          already_ignored = 1;
+          printf("    [信息] 备份文件已在.gitignore中忽略: %s\n",
+                 backup_filename);
+          break;
+        }
+      }
+      line = strtok(NULL, "\n");
     }
+
+    free(content_copy);
   }
 
   // 如果尚未忽略，则添加到.gitignore
@@ -1745,7 +1816,7 @@ int update_gitignore_for_skipped_file(const char *skipped_file_path) {
   if (existing_content)
     free(existing_content);
 
-  return 1;
+  return !already_ignored; // 返回1表示进行了更新，0表示已存在
 }
 
 // 打印统计信息
