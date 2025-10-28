@@ -2838,12 +2838,12 @@ int run_grouping_test_with_git(char *paths[], int path_count,
     printf("\n[重启] 检测到大文件处理，准备重启程序...\n");
 
     // 释放内存
-    free_additional_files(&additional);
-    free_group_result(&result);
+    // free_additional_files(&additional);
+    // free_group_result(&result);
 
     // 重启程序（这里需要传递argv参数，稍后在main函数中处理）
     // 重启逻辑将在main函数中实现
-    return 1;
+    // return 1;
   }
 
   // 如果没有重启，继续正常流程
@@ -2880,8 +2880,8 @@ int run_grouping_test(char *paths[], int path_count) {
     printf("\n[重启] 检测到大文件处理，准备重启程序...\n");
 
     // 释放内存
-    free_additional_files(&additional);
-    free_group_result(&result);
+    // free_additional_files(&additional);
+    // free_group_result(&result);
 
     return 1;
   }
