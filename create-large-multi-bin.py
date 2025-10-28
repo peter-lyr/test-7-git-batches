@@ -11,10 +11,10 @@ prefix = "空 d"
 # 总大小设置为GB
 total_size_mb = 2560
 # 每个文件大小范围
-min_file_size = 80 * 1024 * 1024
-max_file_size = 99 * 1024 * 1024
+min_file_size = 50 * 1024 * 1024
+max_file_size = 90 * 1024 * 1024
 # 每个文件夹大小范围
-min_folder_size = 400 * 1024 * 1024
+min_folder_size = 300 * 1024 * 1024
 max_folder_size = 800 * 1024 * 1024
 
 
