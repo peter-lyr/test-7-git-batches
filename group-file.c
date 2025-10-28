@@ -429,12 +429,27 @@ int create_directory_recursive(const wchar_t *wpath) {
   return 1;
 }
 
-// 复制文件函数
+// 修改：改进的文件备份函数，增强路径处理
 int copy_file_with_backup(const char *src_path, const char *backup_base_path) {
   // 转换源路径为宽字符
   wchar_t *wsrc_path = char_to_wchar(src_path);
   if (!wsrc_path) {
     printf("[错误] 无法转换源路径编码: %s\n", src_path);
+    return 0;
+  }
+
+  // 首先验证源文件是否存在且可访问
+  DWORD src_attr = GetFileAttributesW(wsrc_path);
+  if (src_attr == INVALID_FILE_ATTRIBUTES) {
+    DWORD error = GetLastError();
+    printf("[错误] 源文件无法访问: %s (错误: %lu)\n", src_path, error);
+    free(wsrc_path);
+    return 0;
+  }
+
+  if (src_attr & FILE_ATTRIBUTE_DIRECTORY) {
+    printf("[错误] 源路径是目录而不是文件: %s\n", src_path);
+    free(wsrc_path);
     return 0;
   }
 
@@ -1039,7 +1054,7 @@ int clear_directory(const wchar_t *wdir_path) {
   return success;
 }
 
-// 修改：在拆分完成后删除原文件
+// 修改：改进的大文件拆分函数，增强错误处理
 int split_large_file(const char *file_path, const char *split_dir,
                      long long file_size) {
   printf("    正在处理大文件拆分...\n");
@@ -1060,6 +1075,23 @@ int split_large_file(const char *file_path, const char *split_dir,
       free(wfile_path);
     if (wsplit_dir)
       free(wsplit_dir);
+    return 0;
+  }
+
+  // 新增：验证源文件是否存在且可访问
+  DWORD source_attr = GetFileAttributesW(wfile_path);
+  if (source_attr == INVALID_FILE_ATTRIBUTES) {
+    DWORD error = GetLastError();
+    printf("    [错误] 源文件无法访问: %s (错误: %lu)\n", file_path, error);
+    free(wfile_path);
+    free(wsplit_dir);
+    return 0;
+  }
+
+  if (source_attr & FILE_ATTRIBUTE_DIRECTORY) {
+    printf("    [错误] 源路径是目录而不是文件: %s\n", file_path);
+    free(wfile_path);
+    free(wsplit_dir);
     return 0;
   }
 
@@ -1229,7 +1261,7 @@ int split_large_file(const char *file_path, const char *split_dir,
   }
 }
 
-// 修改：改进拆分完整性检查的调试信息
+// 修改：改进拆分完整性检查，使用宽字符API
 int is_split_complete(const char *file_path, const char *split_dir,
                       long long file_size) {
   // 转换路径为宽字符
@@ -1311,29 +1343,82 @@ int is_split_complete(const char *file_path, const char *split_dir,
   return 1;
 }
 
-// 新增：删除原文件的函数
+// 新增：文件状态验证函数，用于调试
+void debug_file_status(const char *file_path) {
+  printf("    [调试] 检查文件状态: %s\n", file_path);
+
+  // 使用ANSI API检查
+  DWORD attr_a = GetFileAttributesA(file_path);
+  if (attr_a == INVALID_FILE_ATTRIBUTES) {
+    DWORD error = GetLastError();
+    printf("      ANSI API: 无法访问 (错误: %lu)\n", error);
+  } else {
+    if (attr_a & FILE_ATTRIBUTE_DIRECTORY) {
+      printf("      ANSI API: 目录\n");
+    } else {
+      printf("      ANSI API: 文件\n");
+    }
+  }
+
+  // 使用Unicode API检查
+  wchar_t *wpath = char_to_wchar(file_path);
+  if (wpath) {
+    DWORD attr_w = GetFileAttributesW(wpath);
+    if (attr_w == INVALID_FILE_ATTRIBUTES) {
+      DWORD error = GetLastError();
+      printf("      Unicode API: 无法访问 (错误: %lu)\n", error);
+    } else {
+      if (attr_w & FILE_ATTRIBUTE_DIRECTORY) {
+        printf("      Unicode API: 目录\n");
+      } else {
+        printf("      Unicode API: 文件\n");
+      }
+    }
+    free(wpath);
+  } else {
+    printf("      Unicode API: 无法转换路径\n");
+  }
+}
+
+// 修改：改进的删除原文件函数，解决路径识别问题
 int delete_original_file(const char *file_path) {
   if (!file_path || strlen(file_path) == 0) {
     printf("    [错误] 文件路径为空\n");
     return 0;
   }
 
-  // 首先检查文件是否存在
-  DWORD attr = GetFileAttributesA(file_path);
-  if (attr == INVALID_FILE_ATTRIBUTES) {
-    printf("    [信息] 文件已不存在: %s\n", file_path);
-    // return 1; // 文件不存在，视为删除成功
-  }
+  // 新增：调试信息
+  printf("    [调试] 准备删除文件: %s\n", file_path);
+  debug_file_status(file_path);
 
-  if (attr & FILE_ATTRIBUTE_DIRECTORY) {
-    printf("    [错误] 路径是目录而不是文件: %s\n", file_path);
-    return 0;
-  }
-
-  // 转换路径为宽字符
+  // 首先使用宽字符API检查文件状态，避免中文路径问题
   wchar_t *wfile_path = char_to_wchar(file_path);
   if (!wfile_path) {
     printf("    [错误] 无法转换文件路径编码: %s\n", file_path);
+    return 0;
+  }
+
+  DWORD attr = GetFileAttributesW(wfile_path);
+
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    DWORD error = GetLastError();
+    // 文件确实不存在
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+      printf("    [信息] 文件已不存在: %s\n", file_path);
+      free(wfile_path);
+      return 1; // 文件不存在，视为删除成功
+    } else {
+      // 其他错误，可能是权限问题等
+      printf("    [错误] 无法访问文件 %s (错误: %lu)\n", file_path, error);
+      free(wfile_path);
+      return 0;
+    }
+  }
+
+  // 检查是否是目录
+  if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+    printf("    [错误] 路径是目录而不是文件: %s\n", file_path);
+    free(wfile_path);
     return 0;
   }
 
