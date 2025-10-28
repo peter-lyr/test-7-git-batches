@@ -111,6 +111,8 @@ void normalize_directory_path(char *path);
 
 void print_detailed_group_info(const FileGroup *group, int group_index);
 
+int delete_original_file(const char *file_path);
+
 // 安全的内存分配函数
 void *safe_malloc(size_t size) {
   void *ptr = malloc(size);
@@ -976,7 +978,7 @@ int clear_directory(const wchar_t *wdir_path) {
   return success;
 }
 
-// 修改：拆分大文件的函数，添加完整性检查
+// 修改：在拆分完成后删除原文件
 int split_large_file(const char *file_path, const char *split_dir,
                      long long file_size) {
   printf("    正在处理大文件拆分...\n");
@@ -1136,8 +1138,6 @@ int split_large_file(const char *file_path, const char *split_dir,
 
   free(buffer);
   CloseHandle(hSource);
-  free(wfile_path);
-  free(wsplit_dir);
 
   // 最终验证拆分是否完整
   if (success_parts == total_parts) {
@@ -1146,14 +1146,24 @@ int split_large_file(const char *file_path, const char *split_dir,
     // 最终完整性检查
     if (is_split_complete(file_path, split_dir, file_size)) {
       printf("    [验证] 拆分完整性验证通过\n");
+
+      // 新增：拆分成功后删除原文件（但不在这个函数中删除，由调用者控制）
+      printf("    [信息] 拆分完成，原文件将在备份后被删除\n");
+
+      free(wfile_path);
+      free(wsplit_dir);
       return 1;
     } else {
       printf("    [警告] 拆分完整性验证失败\n");
+      free(wfile_path);
+      free(wsplit_dir);
       return 0;
     }
   } else {
     printf("    [警告] 文件拆分部分成功: %d/%d 个部分\n", success_parts,
            total_parts);
+    free(wfile_path);
+    free(wsplit_dir);
     return 0;
   }
 }
@@ -1240,7 +1250,63 @@ int is_split_complete(const char *file_path, const char *split_dir,
   return 1;
 }
 
-// 修改：修复备份和.gitignore更新计数的逻辑
+// 新增：删除原文件的函数
+int delete_original_file(const char *file_path) {
+  if (!file_path || strlen(file_path) == 0) {
+    printf("    [错误] 文件路径为空\n");
+    return 0;
+  }
+
+  // 首先检查文件是否存在
+  DWORD attr = GetFileAttributesA(file_path);
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    printf("    [信息] 文件已不存在: %s\n", file_path);
+    return 1; // 文件不存在，视为删除成功
+  }
+
+  if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+    printf("    [错误] 路径是目录而不是文件: %s\n", file_path);
+    return 0;
+  }
+
+  // 转换路径为宽字符
+  wchar_t *wfile_path = char_to_wchar(file_path);
+  if (!wfile_path) {
+    printf("    [错误] 无法转换文件路径编码: %s\n", file_path);
+    return 0;
+  }
+
+  // 尝试删除文件
+  if (DeleteFileW(wfile_path)) {
+    printf("    [成功] 文件删除成功: %s\n", file_path);
+    free(wfile_path);
+    return 1;
+  } else {
+    DWORD error = GetLastError();
+    printf("    [错误] 无法删除文件 %s (错误: %lu)\n", file_path, error);
+
+    // 根据错误代码提供更详细的错误信息
+    switch (error) {
+    case ERROR_FILE_NOT_FOUND:
+      printf("        文件不存在\n");
+      break;
+    case ERROR_ACCESS_DENIED:
+      printf("        访问被拒绝，文件可能正在被使用或没有权限\n");
+      break;
+    case ERROR_SHARING_VIOLATION:
+      printf("        文件正在被其他进程使用\n");
+      break;
+    default:
+      printf("        未知错误\n");
+      break;
+    }
+
+    free(wfile_path);
+    return 0;
+  }
+}
+
+// 修改：在备份完成后删除大文件
 AdditionalFiles print_skipped_files(GroupResult *result) {
   AdditionalFiles additional = {0};
   additional.gitignore_files = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
@@ -1262,8 +1328,9 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
   int backup_success_count = 0;
   int gitignore_update_count = 0;
   int split_success_count = 0;
-  int backup_attempt_count = 0;    // 新增：实际尝试备份的文件数
-  int gitignore_attempt_count = 0; // 新增：实际尝试更新.gitignore的目录数
+  int backup_attempt_count = 0;
+  int gitignore_attempt_count = 0;
+  int delete_success_count = 0; // 新增：成功删除的文件计数
 
   // 获取当前工作目录作为Git仓库路径
   char git_repo_path[MAX_PATH_LENGTH];
@@ -1309,14 +1376,23 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
 
         // 拆分完成后进行备份（只有拆分成功才需要备份原文件）
         printf("    正在备份原文件...\n");
-        backup_attempt_count++; // 记录尝试备份的次数
+        backup_attempt_count++;
 
         if (copy_file_with_backup(result->skipped_files[i].path,
                                   backup_base_dir)) {
           backup_success_count++;
           printf("    [成功] 原文件备份完成\n");
+
+          // 新增：备份成功后删除原文件
+          printf("    正在删除原文件...\n");
+          if (delete_original_file(result->skipped_files[i].path)) {
+            delete_success_count++;
+            printf("    [成功] 原文件已删除\n");
+          } else {
+            printf("    [警告] 原文件删除失败\n");
+          }
         } else {
-          printf("    [警告] 原文件备份失败\n");
+          printf("    [警告] 原文件备份失败，跳过删除步骤\n");
         }
 
         // 记录拆分目录路径，后续添加到分组
@@ -1327,8 +1403,8 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
           additional.split_count++;
         }
 
-        // 更新.gitignore文件以忽略原文件（只有备份成功才需要更新.gitignore）
-        gitignore_attempt_count++; // 记录尝试更新.gitignore的次数
+        // 更新.gitignore文件以忽略原文件
+        gitignore_attempt_count++;
         if (update_gitignore_for_skipped_file(result->skipped_files[i].path)) {
           gitignore_update_count++;
 
@@ -1337,7 +1413,6 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
           char dir_path[MAX_PATH_LENGTH];
           strcpy_s(dir_path, MAX_PATH_LENGTH, result->skipped_files[i].path);
 
-          // 找到最后一个路径分隔符
           char *last_slash = strrchr(dir_path, '\\');
           if (!last_slash) {
             last_slash = strrchr(dir_path, '/');
@@ -1372,31 +1447,38 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
         additional.split_count++;
       }
 
-      // 检查是否需要备份（如果原文件仍然存在）
+      // 检查是否需要备份和删除（如果原文件仍然存在）
       DWORD attr = GetFileAttributesA(result->skipped_files[i].path);
       if (attr != INVALID_FILE_ATTRIBUTES &&
           !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
         printf("    原文件仍然存在，进行备份...\n");
-        backup_attempt_count++; // 记录尝试备份的次数
+        backup_attempt_count++;
 
         if (copy_file_with_backup(result->skipped_files[i].path,
                                   backup_base_dir)) {
           backup_success_count++;
           printf("    [成功] 原文件备份完成\n");
 
+          // 新增：备份成功后删除原文件
+          printf("    正在删除原文件...\n");
+          if (delete_original_file(result->skipped_files[i].path)) {
+            delete_success_count++;
+            printf("    [成功] 原文件已删除\n");
+          } else {
+            printf("    [警告] 原文件删除失败\n");
+          }
+
           // 只有备份成功才需要更新.gitignore
-          gitignore_attempt_count++; // 记录尝试更新.gitignore的次数
+          gitignore_attempt_count++;
           if (update_gitignore_for_skipped_file(
                   result->skipped_files[i].path)) {
             gitignore_update_count++;
           }
         } else {
-          printf("    [警告] 原文件备份失败\n");
+          printf("    [警告] 原文件备份失败，跳过删除步骤\n");
         }
       } else {
-        printf("    [信息] 原文件已不存在，无需备份\n");
-        // 原文件不存在，不需要备份，但可能仍然需要检查.gitignore
-        // 这里可以选择性地检查.gitignore是否需要更新
+        printf("    [信息] 原文件已不存在，无需备份和删除\n");
       }
     }
 
@@ -1421,6 +1503,10 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
     printf("备份成功: 0/0 个文件 (无需备份)\n");
   }
 
+  // 新增：显示删除统计
+  printf("删除成功: %d/%d 个文件\n", delete_success_count,
+         backup_success_count);
+
   // 使用实际尝试更新.gitignore的数量作为分母
   if (gitignore_attempt_count > 0) {
     printf(".gitignore更新: %d/%d 个目录\n", gitignore_update_count,
@@ -1436,6 +1522,14 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
     printf("[成功] 所有需要备份的大文件已备份到: %s-backup\n", git_repo_path);
   } else {
     printf("[信息] 没有需要备份的文件\n");
+  }
+
+  // 新增：删除结果提示
+  if (delete_success_count > 0) {
+    printf("[成功] %d 个原文件已删除\n", delete_success_count);
+  }
+  if (backup_success_count > 0 && delete_success_count < backup_success_count) {
+    printf("[警告] 部分文件备份成功但删除失败\n");
   }
 
   if (split_success_count < result->skipped_count) {
