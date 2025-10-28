@@ -1198,14 +1198,13 @@ int is_split_complete(const char *file_path, const char *split_dir,
     return 0; // 目录为空，需要拆分
   }
 
-  // 允许1%的大小误差（考虑到文件系统可能的一些微小差异）
   long long size_difference = llabs(split_total_size - file_size);
   double difference_ratio = (double)size_difference / file_size;
 
   printf("    拆分检查: 原文件 %lld bytes, 拆分文件 %lld bytes, 差异 %.4f%%\n",
          file_size, split_total_size, difference_ratio * 100);
 
-  if (difference_ratio > 0.01) { // 超过1%的差异认为不完整
+  if (size_difference > 0) {
     printf("    文件大小不匹配，需要重新拆分\n");
     return 0;
   }
