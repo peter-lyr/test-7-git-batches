@@ -200,3 +200,13 @@ other: 调整打印顺序
     [成功] 命令执行成功
 分析并解决分组错误的问题
 需要修改或者添加的函数完整输出出来，不要有保持代码不变等注释，不同的函数单独放一个代码块里
+
+E:\test-7-git-batches-large-repo-6\大文件\ 只有一个文件夹: E:\test-7-git-batches-large-repo-6\大文件\中 空b1\
+E:\test-7-git-batches-large-repo-6\大文件\中 空b1\ 也只有一个文件夹: E:\test-7-git-batches-large-repo-6\大文件\中 空b1\空 c0000\
+E:\test-7-git-batches-large-repo-6\大文件\中 空b1\空 c0000\ 只有两个文件:
+E:\test-7-git-batches-large-repo-6\大文件\中 空b1\空 c0000\空 d0000.bin 53.1MB 超过50M视为大文件
+E:\test-7-git-batches-large-repo-6\大文件\中 空b1\空 c0000\空 d0001.bin 3.32MB
+分析分组1和分组2有重叠的原因，并提出解决方案
+需要修改或者添加的函数完整输出出来，不要有保持代码不变等注释，不同的函数单独放一个代码块里
+
+分析分组1和分组2有重叠的问题解决

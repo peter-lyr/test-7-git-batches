@@ -240,7 +240,42 @@ void draw_progress_bar(int current, int total, const char *prefix) {
   fflush(stdout);
 }
 
-// 迭代计算文件夹大小
+// 新增：检查目录是否已处理的辅助函数
+int is_directory_already_processed(const char *dir_path, char **processed_dirs,
+                                   int processed_count) {
+  if (!dir_path || !processed_dirs) {
+    return 0;
+  }
+
+  // 确保目录路径格式一致（以反斜杠结尾）
+  char normalized_dir[MAX_PATH_LENGTH];
+  strcpy_s(normalized_dir, MAX_PATH_LENGTH, dir_path);
+  normalize_directory_path(normalized_dir);
+
+  for (int i = 0; i < processed_count; i++) {
+    char normalized_processed[MAX_PATH_LENGTH];
+    strcpy_s(normalized_processed, MAX_PATH_LENGTH, processed_dirs[i]);
+    normalize_directory_path(normalized_processed);
+
+    if (strcmp(normalized_dir, normalized_processed) == 0) {
+      return 1;
+    }
+
+    // 检查是否是子目录关系
+    if (strstr(normalized_dir, normalized_processed) == normalized_dir) {
+      // 当前目录是已处理目录的子目录
+      return 1;
+    }
+    if (strstr(normalized_processed, normalized_dir) == normalized_processed) {
+      // 已处理目录是当前目录的子目录
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+// 修改：改进的目录大小计算函数，避免重复统计
 long long calculate_directory_size_iterative(const wchar_t *wpath,
                                              long long *total_scanned_size) {
   long long total_size = 0;
@@ -248,9 +283,20 @@ long long calculate_directory_size_iterative(const wchar_t *wpath,
                                                         MAX_DIRECTORY_QUEUE);
   int queue_front = 0, queue_rear = 0;
 
+  // 新增：用于跟踪已计算大小的目录，避免重复
+  wchar_t **processed_dirs =
+      (wchar_t **)safe_malloc(sizeof(wchar_t *) * MAX_DIRECTORY_QUEUE);
+  int processed_count = 0;
+
   wcscpy_s(queue[queue_rear].path, MAX_PATH_LENGTH, wpath);
   queue[queue_rear].depth = 0;
   queue_rear = (queue_rear + 1) % MAX_DIRECTORY_QUEUE;
+
+  // 添加初始目录到已处理列表
+  processed_dirs[processed_count] =
+      (wchar_t *)safe_malloc((wcslen(wpath) + 1) * sizeof(wchar_t));
+  wcscpy_s(processed_dirs[processed_count], MAX_PATH_LENGTH, wpath);
+  processed_count++;
 
   while (queue_front != queue_rear) {
     DirectoryEntry current = queue[queue_front];
@@ -284,11 +330,33 @@ long long calculate_directory_size_iterative(const wchar_t *wpath,
         continue;
       }
 
+      // 检查是否已处理过此目录
+      int already_processed = 0;
+      for (int i = 0; i < processed_count; i++) {
+        if (wcscmp(processed_dirs[i], full_path) == 0) {
+          already_processed = 1;
+          break;
+        }
+      }
+
+      if (already_processed) {
+        continue;
+      }
+
       if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
         if ((queue_rear + 1) % MAX_DIRECTORY_QUEUE != queue_front) {
           wcscpy_s(queue[queue_rear].path, MAX_PATH_LENGTH, full_path);
           queue[queue_rear].depth = current.depth + 1;
           queue_rear = (queue_rear + 1) % MAX_DIRECTORY_QUEUE;
+
+          // 添加到已处理列表
+          if (processed_count < MAX_DIRECTORY_QUEUE) {
+            processed_dirs[processed_count] = (wchar_t *)safe_malloc(
+                (wcslen(full_path) + 1) * sizeof(wchar_t));
+            wcscpy_s(processed_dirs[processed_count], MAX_PATH_LENGTH,
+                     full_path);
+            processed_count++;
+          }
         }
       } else {
         ULARGE_INTEGER file_size;
@@ -302,7 +370,13 @@ long long calculate_directory_size_iterative(const wchar_t *wpath,
     FindClose(hFind);
   }
 
+  // 释放内存
+  for (int i = 0; i < processed_count; i++) {
+    free(processed_dirs[i]);
+  }
+  free(processed_dirs);
   free(queue);
+
   return total_size;
 }
 
@@ -480,21 +554,22 @@ int copy_file_with_backup(const char *src_path, const char *backup_base_path) {
   }
 }
 
-// 迭代收集文件和文件夹信息
+// 修改：改进的迭代收集函数，避免目录重复添加
 void collect_items_iterative(const wchar_t *wpath, FileItem *items,
                              int *item_count, long long *total_scanned_size,
                              long long *skipped_files_size,
-                             GroupResult *result) { // 新增result参数
+                             GroupResult *result) {
   DirectoryEntry *queue = (DirectoryEntry *)safe_malloc(sizeof(DirectoryEntry) *
                                                         MAX_DIRECTORY_QUEUE);
   int queue_front = 0, queue_rear = 0;
 
+  // 新增：用于跟踪已处理的目录路径，避免重复添加
+  char **processed_dirs = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
+  int processed_count = 0;
+
   wcscpy_s(queue[queue_rear].path, MAX_PATH_LENGTH, wpath);
   queue[queue_rear].depth = 0;
   queue_rear = (queue_rear + 1) % MAX_DIRECTORY_QUEUE;
-
-  char **processed_dirs = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
-  int processed_count = 0;
 
   while (queue_front != queue_rear && *item_count < MAX_ITEMS) {
     DirectoryEntry current = queue[queue_front];
@@ -529,41 +604,14 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
       }
 
       if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-        long long dir_size =
-            calculate_directory_size_iterative(full_path, total_scanned_size);
+        // 修改：不再在递归扫描中添加目录，只在初始处理时添加
+        // 目录项由 process_input_path 函数统一添加，避免重复
 
-        if (dir_size <= MAX_GROUP_SIZE) {
-          char *char_path = wchar_to_char(full_path);
-          if (char_path) {
-            normalize_path(char_path);
-
-            int already_processed = 0;
-            for (int i = 0; i < processed_count; i++) {
-              if (strcmp(processed_dirs[i], char_path) == 0) {
-                already_processed = 1;
-                break;
-              }
-            }
-
-            if (!already_processed && strlen(char_path) < MAX_PATH_LENGTH - 1) {
-              processed_dirs[processed_count] =
-                  (char *)safe_malloc(strlen(char_path) + 1);
-              strcpy(processed_dirs[processed_count], char_path);
-              processed_count++;
-
-              strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, char_path);
-              items[*item_count].size = dir_size;
-              items[*item_count].type = TYPE_DIRECTORY;
-              (*item_count)++;
-            }
-            free(char_path);
-          }
-        } else {
-          if ((queue_rear + 1) % MAX_DIRECTORY_QUEUE != queue_front) {
-            wcscpy_s(queue[queue_rear].path, MAX_PATH_LENGTH, full_path);
-            queue[queue_rear].depth = current.depth + 1;
-            queue_rear = (queue_rear + 1) % MAX_DIRECTORY_QUEUE;
-          }
+        // 只将子目录加入队列进行递归扫描，不添加到items列表
+        if ((queue_rear + 1) % MAX_DIRECTORY_QUEUE != queue_front) {
+          wcscpy_s(queue[queue_rear].path, MAX_PATH_LENGTH, full_path);
+          queue[queue_rear].depth = current.depth + 1;
+          queue_rear = (queue_rear + 1) % MAX_DIRECTORY_QUEUE;
         }
       } else {
         ULARGE_INTEGER file_size;
@@ -582,7 +630,7 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
           }
           *skipped_files_size += file_size.QuadPart;
 
-          // 新增：记录跳过大文件信息
+          // 记录跳过大文件信息
           if (result->skipped_count < MAX_ITEMS) {
             if (result->skipped_count >= result->skipped_capacity) {
               int new_capacity = result->skipped_capacity == 0
@@ -626,6 +674,7 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
     FindClose(hFind);
   }
 
+  // 释放已处理目录数组
   for (int i = 0; i < processed_count; i++) {
     free(processed_dirs[i]);
   }
@@ -633,7 +682,7 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
   free(queue);
 }
 
-// 修改：改进的process_input_path函数，完全跳过路径存在性检查
+// 修改：改进的路径处理函数，统一目录处理逻辑
 void process_input_path(const char *path, FileItem *items, int *item_count,
                         long long *total_input_size,
                         long long *total_scanned_size,
@@ -671,7 +720,15 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
              normalized_path);
 
       if (*item_count < MAX_ITEMS) {
-        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, normalized_path);
+        // 确保目录路径格式正确
+        char dir_path[MAX_PATH_LENGTH];
+        strcpy_s(dir_path, MAX_PATH_LENGTH, normalized_path);
+        size_t dir_len = strlen(dir_path);
+        if (dir_len > 0 && dir_path[dir_len - 1] != '\\') {
+          strcat_s(dir_path, MAX_PATH_LENGTH, "\\");
+        }
+
+        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, dir_path);
         items[*item_count].size = 0; // 无法计算大小，设为0
         items[*item_count].type = TYPE_DIRECTORY;
         (*item_count)++;
@@ -705,9 +762,8 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
     format_size(dir_size, size_str, sizeof(size_str));
     printf("       文件夹大小: %s\n", size_str);
 
-    if (dir_size > MAX_GROUP_SIZE) {
-      printf("       文件夹太大，递归处理子项...\n");
-    } else {
+    // 修改：统一目录处理逻辑，避免重复添加
+    if (dir_size <= MAX_GROUP_SIZE) {
       printf("       文件夹大小合适，直接添加...\n");
 
       if (*item_count < MAX_ITEMS) {
@@ -723,9 +779,14 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
         items[*item_count].size = dir_size;
         items[*item_count].type = TYPE_DIRECTORY;
         (*item_count)++;
+        printf("       已添加目录: %s\n", dir_path);
       }
+    } else {
+      printf("       文件夹太大，递归处理子项（不添加目录本身）...\n");
     }
 
+    // 修改：无论目录大小如何，都递归扫描内容
+    // 但只在目录大小超过限制时才在递归扫描中添加文件
     collect_items_iterative(wpath, items, item_count, total_scanned_size,
                             skipped_files_size, result);
   } else {
@@ -1261,7 +1322,7 @@ int delete_original_file(const char *file_path) {
   DWORD attr = GetFileAttributesA(file_path);
   if (attr == INVALID_FILE_ATTRIBUTES) {
     printf("    [信息] 文件已不存在: %s\n", file_path);
-    return 1; // 文件不存在，视为删除成功
+    // return 1; // 文件不存在，视为删除成功
   }
 
   if (attr & FILE_ATTRIBUTE_DIRECTORY) {
@@ -2335,12 +2396,17 @@ void execute_git_commands(const GroupResult *result,
                             : 0.0);
 }
 
-// 新增：辅助函数，用于在分组信息中显示更详细的大小信息
+// 修改：改进的分组信息显示，检查重复项
 void print_detailed_group_info(const FileGroup *group, int group_index) {
   printf("分组 %d 详细信息:\n", group_index + 1);
 
   long long total_size = 0;
   int file_count = 0, dir_count = 0;
+
+  // 新增：检查重复项
+  char **processed_paths = (char **)safe_malloc(sizeof(char *) * group->count);
+  int processed_count = 0;
+  int duplicate_count = 0;
 
   for (int i = 0; i < group->count; i++) {
     total_size += group->items[i].size;
@@ -2349,6 +2415,41 @@ void print_detailed_group_info(const FileGroup *group, int group_index) {
     } else {
       dir_count++;
     }
+
+    // 检查重复路径
+    int is_duplicate = 0;
+    char normalized_path[MAX_PATH_LENGTH];
+    strcpy_s(normalized_path, MAX_PATH_LENGTH, group->items[i].path);
+
+    if (group->items[i].type == TYPE_DIRECTORY) {
+      normalize_directory_path(normalized_path);
+    } else {
+      normalize_path(normalized_path);
+    }
+
+    for (int j = 0; j < processed_count; j++) {
+      char normalized_processed[MAX_PATH_LENGTH];
+      strcpy_s(normalized_processed, MAX_PATH_LENGTH, processed_paths[j]);
+
+      if (group->items[i].type == TYPE_DIRECTORY) {
+        normalize_directory_path(normalized_processed);
+      } else {
+        normalize_path(normalized_processed);
+      }
+
+      if (strcmp(normalized_path, normalized_processed) == 0) {
+        is_duplicate = 1;
+        duplicate_count++;
+        break;
+      }
+    }
+
+    if (!is_duplicate && processed_count < group->count) {
+      processed_paths[processed_count] =
+          (char *)safe_malloc(strlen(normalized_path) + 1);
+      strcpy(processed_paths[processed_count], normalized_path);
+      processed_count++;
+    }
   }
 
   char size_str[32];
@@ -2356,6 +2457,10 @@ void print_detailed_group_info(const FileGroup *group, int group_index) {
 
   printf("  总大小: %s\n", size_str);
   printf("  包含: %d 个文件, %d 个文件夹\n", file_count, dir_count);
+
+  if (duplicate_count > 0) {
+    printf("  [警告] 发现 %d 个重复项\n", duplicate_count);
+  }
 
   // 显示使用率
   double usage_rate = (double)total_size / MAX_GROUP_SIZE * 100;
@@ -2375,6 +2480,13 @@ void print_detailed_group_info(const FileGroup *group, int group_index) {
   if (group->count > 3) {
     printf("    ... 还有 %d 个项\n", group->count - 3);
   }
+
+  // 释放内存
+  for (int i = 0; i < processed_count; i++) {
+    free(processed_paths[i]);
+  }
+  free(processed_paths);
+
   printf("\n");
 }
 
@@ -2399,7 +2511,7 @@ void run_grouping_test_with_git(char *paths[], int path_count,
                   skipped_files_size);
 
   // 执行Git操作
-  execute_git_commands(&result, commit_info_file);
+  // execute_git_commands(&result, commit_info_file);
 
   // 释放内存
   free_additional_files(&additional);
@@ -2573,7 +2685,7 @@ char **get_git_status_paths(int *path_count) {
   return paths;
 }
 
-// 新增：专门为目录路径准备的规范化函数
+// 修改：改进的目录路径规范化函数
 void normalize_directory_path(char *path) {
   if (!path || strlen(path) == 0)
     return;
@@ -2581,12 +2693,22 @@ void normalize_directory_path(char *path) {
   // 首先调用基本规范化
   normalize_path(path);
 
-  // 确保目录路径以反斜杠结尾
+  // 确保目录路径以反斜杠结尾（除非是根目录）
   size_t len = strlen(path);
   if (len > 0 && path[len - 1] != '\\') {
-    if (len < MAX_PATH_LENGTH - 1) {
-      path[len] = '\\';
-      path[len + 1] = '\0';
+    // 检查是否是盘符根目录（如 "C:"）
+    if (len == 2 && path[1] == ':') {
+      // 盘符根目录，添加反斜杠
+      if (len < MAX_PATH_LENGTH - 1) {
+        path[len] = '\\';
+        path[len + 1] = '\0';
+      }
+    } else if (!(len == 3 && path[1] == ':' && path[2] == '\\')) {
+      // 不是盘符根目录，确保以反斜杠结尾
+      if (len < MAX_PATH_LENGTH - 1) {
+        path[len] = '\\';
+        path[len + 1] = '\0';
+      }
     }
   }
 }
