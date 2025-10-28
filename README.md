@@ -95,3 +95,10 @@ update_gitignore_for_skipped_file之后
 需要拆分时，
 如果拆分目录存在，则先清空拆分目录
 需要修改或者添加的函数完整输出出来
+
+print_skipped_files的for循环跑完之后
+把update_gitignore_for_skipped_file里创建或更新的.gitignore文件
+和split_large_file里创建的拆分目录里的所有拆分文件
+一起加入到分组中去
+先调用print_skipped_files再调用print_groups
+需要修改或者添加的函数完整输出出来

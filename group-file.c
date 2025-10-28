@@ -48,6 +48,14 @@ typedef struct {
   int depth;
 } DirectoryEntry;
 
+// 修改print_skipped_files函数，返回需要添加到分组的文件列表
+typedef struct {
+  char **gitignore_files; // .gitignore文件路径
+  int gitignore_count;
+  char **split_files; // 拆分文件路径
+  int split_count;
+} AdditionalFiles;
+
 // 函数声明
 void *safe_malloc(size_t size);
 void *safe_realloc(void *ptr, size_t size);
@@ -73,7 +81,7 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
 int compare_items(const void *a, const void *b);
 GroupResult group_files(FileItem *items, int item_count);
 void print_groups(const GroupResult *result);
-void print_skipped_files(GroupResult *result);
+AdditionalFiles print_skipped_files(GroupResult *result);
 void print_statistics(const GroupResult *result, long long total_scanned_size,
                       long long skipped_files_size);
 void validate_result(const GroupResult *result, long long input_total_size,
@@ -92,6 +100,9 @@ char **get_git_status_paths(int *path_count);
 void free_git_status_paths(char **paths, int path_count);
 
 int update_gitignore_for_skipped_file(const char *skipped_file_path);
+
+void collect_split_directory_files(const wchar_t *wdir_path, FileItem *items,
+                                   int *item_count);
 
 // 安全的内存分配函数
 void *safe_malloc(size_t size) {
@@ -1133,11 +1144,14 @@ int is_split_complete(const char *file_path, const char *split_dir,
   return 0;
 }
 
-// 修改：print_skipped_files函数中的拆分逻辑
-void print_skipped_files(GroupResult *result) {
+AdditionalFiles print_skipped_files(GroupResult *result) {
+  AdditionalFiles additional = {0};
+  additional.gitignore_files = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
+  additional.split_files = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
+
   if (result->skipped_count == 0) {
     printf("\n[信息] 没有跳过的大文件\n");
-    return;
+    return additional;
   }
 
   printf("\n========================================\n");
@@ -1156,7 +1170,7 @@ void print_skipped_files(GroupResult *result) {
   char git_repo_path[MAX_PATH_LENGTH];
   if (!GetCurrentDirectoryA(MAX_PATH_LENGTH, git_repo_path)) {
     printf("[错误] 无法获取当前工作目录\n");
-    return;
+    return additional;
   }
 
   normalize_path(git_repo_path);
@@ -1197,10 +1211,43 @@ void print_skipped_files(GroupResult *result) {
           split_success_count++;
           printf("    [成功] 大文件拆分完成\n");
 
+          // 记录拆分目录路径，后续添加到分组
+          if (additional.split_count < MAX_ITEMS) {
+            additional.split_files[additional.split_count] =
+                (char *)safe_malloc(strlen(split_dir) + 1);
+            strcpy(additional.split_files[additional.split_count], split_dir);
+            additional.split_count++;
+          }
+
           // 更新.gitignore文件以忽略原文件
           if (update_gitignore_for_skipped_file(
                   result->skipped_files[i].path)) {
             gitignore_update_count++;
+
+            // 记录.gitignore文件路径，后续添加到分组
+            char gitignore_path[MAX_PATH_LENGTH];
+            char dir_path[MAX_PATH_LENGTH];
+            strcpy_s(dir_path, MAX_PATH_LENGTH, result->skipped_files[i].path);
+
+            // 找到最后一个路径分隔符
+            char *last_slash = strrchr(dir_path, '\\');
+            if (!last_slash) {
+              last_slash = strrchr(dir_path, '/');
+            }
+
+            if (last_slash) {
+              *last_slash = '\0';
+              snprintf(gitignore_path, MAX_PATH_LENGTH, "%s\\.gitignore",
+                       dir_path);
+
+              if (additional.gitignore_count < MAX_ITEMS) {
+                additional.gitignore_files[additional.gitignore_count] =
+                    (char *)safe_malloc(strlen(gitignore_path) + 1);
+                strcpy(additional.gitignore_files[additional.gitignore_count],
+                       gitignore_path);
+                additional.gitignore_count++;
+              }
+            }
           }
         } else {
           printf("    [失败] 大文件拆分失败\n");
@@ -1208,6 +1255,14 @@ void print_skipped_files(GroupResult *result) {
       } else {
         printf("    [信息] 大文件已拆分，跳过拆分步骤\n");
         split_success_count++;
+
+        // 即使已拆分，也要记录拆分目录
+        if (additional.split_count < MAX_ITEMS) {
+          additional.split_files[additional.split_count] =
+              (char *)safe_malloc(strlen(split_dir) + 1);
+          strcpy(additional.split_files[additional.split_count], split_dir);
+          additional.split_count++;
+        }
       }
     }
 
@@ -1245,6 +1300,218 @@ void print_skipped_files(GroupResult *result) {
   } else if (gitignore_update_count > 0) {
     printf("[成功] 所有相关.gitignore文件已更新\n");
   }
+
+  return additional;
+}
+
+// 释放AdditionalFiles内存
+void free_additional_files(AdditionalFiles *additional) {
+  if (additional) {
+    for (int i = 0; i < additional->gitignore_count; i++) {
+      free(additional->gitignore_files[i]);
+    }
+    free(additional->gitignore_files);
+
+    for (int i = 0; i < additional->split_count; i++) {
+      free(additional->split_files[i]);
+    }
+    free(additional->split_files);
+  }
+}
+
+// 将额外文件添加到分组中
+void add_additional_files_to_groups(GroupResult *result,
+                                    AdditionalFiles *additional) {
+  if (!additional ||
+      (!additional->gitignore_count && !additional->split_count)) {
+    return;
+  }
+
+  printf("\n[处理] 正在将额外文件添加到分组...\n");
+
+  // 首先收集所有需要添加的文件信息
+  FileItem *new_items = (FileItem *)safe_malloc(sizeof(FileItem) * MAX_ITEMS);
+  int new_item_count = 0;
+
+  // 添加.gitignore文件
+  for (int i = 0; i < additional->gitignore_count && new_item_count < MAX_ITEMS;
+       i++) {
+    char *path = additional->gitignore_files[i];
+
+    // 检查文件是否存在
+    DWORD attr = GetFileAttributesA(path);
+    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+      // 获取文件大小
+      HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+      if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD sizeLow, sizeHigh;
+        sizeLow = GetFileSize(hFile, &sizeHigh);
+        CloseHandle(hFile);
+
+        ULARGE_INTEGER file_size;
+        file_size.LowPart = sizeLow;
+        file_size.HighPart = sizeHigh;
+
+        strcpy_s(new_items[new_item_count].path, MAX_PATH_LENGTH, path);
+        new_items[new_item_count].size = file_size.QuadPart;
+        new_items[new_item_count].type = TYPE_FILE;
+        new_item_count++;
+
+        printf("  添加.gitignore文件: %s (%lld bytes)\n", path,
+               file_size.QuadPart);
+      }
+    }
+  }
+
+  // 添加拆分目录中的所有文件
+  for (int i = 0; i < additional->split_count && new_item_count < MAX_ITEMS;
+       i++) {
+    char *split_dir = additional->split_files[i];
+
+    // 转换路径为宽字符
+    wchar_t *wsplit_dir = char_to_wchar(split_dir);
+    if (wsplit_dir) {
+      // 递归收集拆分目录中的所有文件
+      collect_split_directory_files(wsplit_dir, new_items, &new_item_count);
+      free(wsplit_dir);
+    }
+  }
+
+  if (new_item_count > 0) {
+    printf("  共找到 %d 个额外文件需要添加到分组\n", new_item_count);
+
+    // 将新文件添加到现有分组中
+    for (int i = 0; i < new_item_count; i++) {
+      FileItem *item = &new_items[i];
+
+      int best_group = -1;
+      long long best_remaining = MAX_GROUP_SIZE;
+
+      // 寻找最佳分组
+      for (int j = 0; j < result->group_count; j++) {
+        long long remaining = MAX_GROUP_SIZE - result->groups[j].total_size;
+        if (remaining >= item->size && remaining < best_remaining) {
+          best_remaining = remaining;
+          best_group = j;
+        }
+      }
+
+      if (best_group != -1) {
+        // 添加到现有分组
+        FileGroup *group = &result->groups[best_group];
+
+        if (group->count >= group->capacity) {
+          int new_capacity = group->capacity * 2;
+          FileItem *new_items_array = (FileItem *)safe_realloc(
+              group->items, sizeof(FileItem) * new_capacity);
+          group->items = new_items_array;
+          group->capacity = new_capacity;
+        }
+
+        group->items[group->count++] = *item;
+        group->total_size += item->size;
+
+        printf("    已添加 '%s' 到分组 %d\n", item->path, best_group + 1);
+      } else {
+        // 创建新分组
+        if (result->group_count >= result->groups_capacity) {
+          int new_capacity = result->groups_capacity * 2;
+          FileGroup *new_groups = (FileGroup *)safe_realloc(
+              result->groups, sizeof(FileGroup) * new_capacity);
+
+          for (int k = result->group_count; k < new_capacity; k++) {
+            new_groups[k].items =
+                (FileItem *)safe_malloc(sizeof(FileItem) * 10);
+            new_groups[k].count = 0;
+            new_groups[k].capacity = 10;
+            new_groups[k].total_size = 0;
+          }
+
+          result->groups = new_groups;
+          result->groups_capacity = new_capacity;
+        }
+
+        FileGroup *new_group = &result->groups[result->group_count];
+        if (new_group->count >= new_group->capacity) {
+          int new_capacity = new_group->capacity * 2;
+          FileItem *new_items_array = (FileItem *)safe_realloc(
+              new_group->items, sizeof(FileItem) * new_capacity);
+          new_group->items = new_items_array;
+          new_group->capacity = new_capacity;
+        }
+
+        new_group->items[new_group->count++] = *item;
+        new_group->total_size += item->size;
+        result->group_count++;
+
+        printf("    已创建新分组 %d 并添加 '%s'\n", result->group_count,
+               item->path);
+      }
+    }
+  } else {
+    printf("  没有找到需要添加的额外文件\n");
+  }
+
+  free(new_items);
+}
+
+// 递归收集拆分目录中的文件
+void collect_split_directory_files(const wchar_t *wdir_path, FileItem *items,
+                                   int *item_count) {
+  wchar_t search_path[MAX_PATH_LENGTH];
+  if (!safe_path_join(search_path, MAX_PATH_LENGTH, wdir_path, L"*")) {
+    return;
+  }
+
+  WIN32_FIND_DATAW find_data;
+  HANDLE hFind = FindFirstFileW(search_path, &find_data);
+
+  if (hFind == INVALID_HANDLE_VALUE) {
+    return;
+  }
+
+  do {
+    if (wcscmp(find_data.cFileName, L".") == 0 ||
+        wcscmp(find_data.cFileName, L"..") == 0) {
+      continue;
+    }
+
+    wchar_t full_path[MAX_PATH_LENGTH];
+    if (!safe_path_join(full_path, MAX_PATH_LENGTH, wdir_path,
+                        find_data.cFileName)) {
+      continue;
+    }
+
+    if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      // 递归处理子目录
+      collect_split_directory_files(full_path, items, item_count);
+    } else {
+      // 添加文件
+      if (*item_count < MAX_ITEMS) {
+        char *char_path = wchar_to_char(full_path);
+        if (char_path) {
+          normalize_path(char_path);
+
+          ULARGE_INTEGER file_size;
+          file_size.LowPart = find_data.nFileSizeLow;
+          file_size.HighPart = find_data.nFileSizeHigh;
+
+          strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, char_path);
+          items[*item_count].size = file_size.QuadPart;
+          items[*item_count].type = TYPE_FILE;
+          (*item_count)++;
+
+          printf("    找到拆分文件: %s (%lld bytes)\n", char_path,
+                 file_size.QuadPart);
+
+          free(char_path);
+        }
+      }
+    }
+  } while (FindNextFileW(hFind, &find_data) && *item_count < MAX_ITEMS);
+
+  FindClose(hFind);
 }
 
 // 新增：更新.gitignore文件以忽略备份的大文件
@@ -1756,7 +2023,7 @@ void execute_git_commands(const GroupResult *result,
                             : 0.0);
 }
 
-// 修改后的run_grouping_test函数，增加Git操作
+// 修改run_grouping_test_with_git函数，调整调用顺序
 void run_grouping_test_with_git(char *paths[], int path_count,
                                 const char *commit_info_file) {
   long long total_scanned_size, skipped_files_size;
@@ -1764,8 +2031,14 @@ void run_grouping_test_with_git(char *paths[], int path_count,
   GroupResult result = process_input_paths(
       paths, path_count, &total_scanned_size, &skipped_files_size);
 
+  // 先调用print_skipped_files，它会返回需要添加的额外文件
+  AdditionalFiles additional = print_skipped_files(&result);
+
+  // 将额外文件添加到分组中
+  add_additional_files_to_groups(&result, &additional);
+
+  // 然后打印更新后的分组结果
   print_groups(&result);
-  print_skipped_files(&result);
   print_statistics(&result, total_scanned_size, skipped_files_size);
   validate_result(&result, result.total_input_size, total_scanned_size,
                   skipped_files_size);
@@ -1773,6 +2046,8 @@ void run_grouping_test_with_git(char *paths[], int path_count,
   // 执行Git操作
   // execute_git_commands(&result, commit_info_file);
 
+  // 释放内存
+  free_additional_files(&additional);
   free_group_result(&result);
 }
 
