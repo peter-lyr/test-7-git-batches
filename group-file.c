@@ -2029,7 +2029,7 @@ GroupResult process_input_paths(char *paths[], int path_count,
   return result;
 }
 
-// 修改：在执行git add命令时打印文件大小信息
+// 修改：在执行git add命令时打印累积大小和分组总大小信息
 void execute_git_commands(const GroupResult *result,
                           const char *commit_info_file) {
   printf("\n========================================\n");
@@ -2073,6 +2073,7 @@ void execute_git_commands(const GroupResult *result,
     size_t buffer_len = wcslen(command_buffer);
     int current_command_path_count = 0;
     long long current_command_total_size = 0; // 当前命令添加的文件总大小
+    long long cumulative_group_size = 0;      // 当前分组累积已添加的大小
 
     for (int item_idx = 0; item_idx < group->count; item_idx++) {
       const FileItem *item = &group->items[item_idx];
@@ -2103,8 +2104,17 @@ void execute_git_commands(const GroupResult *result,
         char command_size_str[32];
         format_size(current_command_total_size, command_size_str,
                     sizeof(command_size_str));
-        printf("  执行命令: git add [%d个路径, 总大小: %s]\n",
-               current_command_path_count, command_size_str);
+
+        // 计算累积到当前的大小
+        cumulative_group_size += current_command_total_size;
+        char cumulative_size_str[32];
+        format_size(cumulative_group_size, cumulative_size_str,
+                    sizeof(cumulative_size_str));
+
+        printf(
+            "  执行命令: git add [%d个路径, 本次添加: %s, 累积添加: %s/%s]\n",
+            current_command_path_count, command_size_str, cumulative_size_str,
+            group_total_size_str);
 
         int ret = _wsystem(command_buffer);
         total_commands++;
@@ -2151,8 +2161,16 @@ void execute_git_commands(const GroupResult *result,
       char command_size_str[32];
       format_size(current_command_total_size, command_size_str,
                   sizeof(command_size_str));
-      printf("  执行命令: git add [%d个路径, 总大小: %s]\n",
-             current_command_path_count, command_size_str);
+
+      // 计算最终累积大小
+      cumulative_group_size += current_command_total_size;
+      char cumulative_size_str[32];
+      format_size(cumulative_group_size, cumulative_size_str,
+                  sizeof(cumulative_size_str));
+
+      printf("  执行命令: git add [%d个路径, 本次添加: %s, 累积添加: %s/%s]\n",
+             current_command_path_count, command_size_str, cumulative_size_str,
+             group_total_size_str);
 
       int ret = _wsystem(command_buffer);
       total_commands++;
