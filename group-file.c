@@ -1959,8 +1959,6 @@ void validate_result(const GroupResult *result, long long input_total_size,
 
   printf("    输入总大小: %s vs\n", input_str);
   printf("    分组总大小: %s\n", grouped_str);
-  printf(" (大文件总大小: %s)\n", skipped_str);
-  printf("   (扫描总大小: %s)\n", scanned_str);
   printf("\n");
 
   if (total_grouped_size == input_total_size) {
