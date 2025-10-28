@@ -107,6 +107,8 @@ void collect_split_directory_files(const wchar_t *wdir_path, FileItem *items,
 int is_split_complete(const char *file_path, const char *split_dir,
                       long long file_size);
 
+void normalize_directory_path(char *path);
+
 // 安全的内存分配函数
 void *safe_malloc(size_t size) {
   void *ptr = malloc(size);
@@ -169,20 +171,30 @@ int safe_path_join(wchar_t *dest, size_t dest_size, const wchar_t *path1,
   return 1;
 }
 
-// 路径规范化函数
+// 修改：改进的路径规范化函数
 void normalize_path(char *path) {
   if (!path || strlen(path) == 0)
     return;
 
   size_t len = strlen(path);
-  while (len > 1 && (path[len - 1] == '\\' || path[len - 1] == '/')) {
-    path[len - 1] = '\0';
-    len--;
-  }
 
+  // 统一路径分隔符为反斜杠
   for (char *p = path; *p; p++) {
     if (*p == '/')
       *p = '\\';
+  }
+
+  // 移除末尾的反斜杠（保留根目录的情况）
+  while (len > 1 && path[len - 1] == '\\') {
+    // 检查是否是根目录或盘符根目录（如 "C:\"）
+    if (len == 3 && path[1] == ':' && path[2] == '\\') {
+      break; // 保留盘符根目录
+    }
+    if (len == 2 && path[0] == '\\' && path[1] == '\\') {
+      break; // 保留网络根目录
+    }
+    path[len - 1] = '\0';
+    len--;
   }
 }
 
@@ -617,27 +629,70 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
   free(queue);
 }
 
-// 处理输入路径
+// 修改：改进的process_input_path函数，完全跳过路径存在性检查
 void process_input_path(const char *path, FileItem *items, int *item_count,
                         long long *total_input_size,
                         long long *total_scanned_size,
-                        long long *skipped_files_size,
-                        GroupResult *result) { // 新增result参数
-  wchar_t *wpath = char_to_wchar(path);
+                        long long *skipped_files_size, GroupResult *result) {
+  // 复制路径以便修改
+  char normalized_path[MAX_PATH_LENGTH];
+  strcpy_s(normalized_path, MAX_PATH_LENGTH, path);
+
+  // 规范化路径（统一使用反斜杠）
+  normalize_path(normalized_path);
+
+  printf("[处理] 正在处理路径: %s\n", normalized_path);
+
+  // 检查是否是目录路径（以反斜杠结尾）
+  int is_directory_path = 0;
+  size_t path_len = strlen(normalized_path);
+  if (path_len > 0 && normalized_path[path_len - 1] == '\\') {
+    is_directory_path = 1;
+    printf("  [信息] 识别为目录路径\n");
+  }
+
+  wchar_t *wpath = char_to_wchar(normalized_path);
   if (!wpath) {
-    printf("[警告] 无法转换路径编码: %s\n", path);
+    printf("[警告] 无法转换路径编码: %s\n", normalized_path);
     return;
   }
 
   DWORD attr = GetFileAttributesW(wpath);
+
   if (attr == INVALID_FILE_ATTRIBUTES) {
-    printf("[警告] 无法访问路径 %s\n", path);
+    // 路径无法访问，但我们仍然根据路径特征判断类型
+    if (is_directory_path) {
+      // 目录路径但无法访问，可能是新目录或权限问题
+      printf("  [警告] 无法访问目录，但根据路径特征识别为目录: %s\n",
+             normalized_path);
+
+      if (*item_count < MAX_ITEMS) {
+        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, normalized_path);
+        items[*item_count].size = 0; // 无法计算大小，设为0
+        items[*item_count].type = TYPE_DIRECTORY;
+        (*item_count)++;
+        printf("  [信息] 已添加目录到处理列表（大小未知）\n");
+      }
+    } else {
+      // 文件路径但无法访问，可能是新文件
+      printf("  [信息] 路径可能为新文件: %s\n", normalized_path);
+
+      if (*item_count < MAX_ITEMS) {
+        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, normalized_path);
+        items[*item_count].size = 0; // 新文件，大小为0
+        items[*item_count].type = TYPE_FILE;
+        (*item_count)++;
+        printf("  [信息] 已添加文件到处理列表（新文件）\n");
+      }
+    }
+
     free(wpath);
     return;
   }
 
+  // 路径可访问的情况
   if (attr & FILE_ATTRIBUTE_DIRECTORY) {
-    printf("[扫描] 文件夹: %s\n", path);
+    printf("  [扫描] 文件夹: %s\n", normalized_path);
     long long dir_size =
         calculate_directory_size_iterative(wpath, total_scanned_size);
     *total_input_size += dir_size;
@@ -652,23 +707,25 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
       printf("       文件夹大小合适，直接添加...\n");
 
       if (*item_count < MAX_ITEMS) {
-        char *char_path = wchar_to_char(wpath);
-        if (char_path) {
-          normalize_path(char_path);
-          if (strlen(char_path) < MAX_PATH_LENGTH - 1) {
-            strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, char_path);
-            items[*item_count].size = dir_size;
-            items[*item_count].type = TYPE_DIRECTORY;
-            (*item_count)++;
-          }
-          free(char_path);
+        // 确保目录路径格式正确
+        char dir_path[MAX_PATH_LENGTH];
+        strcpy_s(dir_path, MAX_PATH_LENGTH, normalized_path);
+        size_t dir_len = strlen(dir_path);
+        if (dir_len > 0 && dir_path[dir_len - 1] != '\\') {
+          strcat_s(dir_path, MAX_PATH_LENGTH, "\\");
         }
+
+        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, dir_path);
+        items[*item_count].size = dir_size;
+        items[*item_count].type = TYPE_DIRECTORY;
+        (*item_count)++;
       }
     }
 
     collect_items_iterative(wpath, items, item_count, total_scanned_size,
-                            skipped_files_size, result); // 新增result参数
+                            skipped_files_size, result);
   } else {
+    printf("  [扫描] 文件: %s\n", normalized_path);
     HANDLE hFile = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
@@ -684,13 +741,13 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
       *total_scanned_size += file_size.QuadPart;
 
       if (file_size.QuadPart > MAX_FILE_SIZE) {
-        printf("[跳过] 大文件: %s", path);
+        printf("       跳过] 大文件: %s", normalized_path);
         char size_str[32];
         format_size(file_size.QuadPart, size_str, sizeof(size_str));
         printf(" (%s)\n", size_str);
         *skipped_files_size += file_size.QuadPart;
 
-        // 新增：记录跳过大文件信息
+        // 记录跳过大文件信息
         if (result->skipped_count < MAX_ITEMS) {
           if (result->skipped_count >= result->skipped_capacity) {
             int new_capacity = result->skipped_capacity == 0
@@ -702,10 +759,6 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
             result->skipped_capacity = new_capacity;
           }
 
-          char normalized_path[MAX_PATH_LENGTH];
-          strcpy_s(normalized_path, MAX_PATH_LENGTH, path);
-          normalize_path(normalized_path);
-
           strcpy_s(result->skipped_files[result->skipped_count].path,
                    MAX_PATH_LENGTH, normalized_path);
           result->skipped_files[result->skipped_count].size =
@@ -714,22 +767,22 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
         }
       } else {
         if (*item_count < MAX_ITEMS) {
-          if (strlen(path) < MAX_PATH_LENGTH - 1) {
-            char normalized_path[MAX_PATH_LENGTH];
-            strcpy_s(normalized_path, MAX_PATH_LENGTH, path);
-            normalize_path(normalized_path);
-
-            strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, normalized_path);
-            items[*item_count].size = file_size.QuadPart;
-            items[*item_count].type = TYPE_FILE;
-            (*item_count)++;
-          } else {
-            printf("[警告] 路径过长被跳过: %s\n", path);
-          }
+          strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, normalized_path);
+          items[*item_count].size = file_size.QuadPart;
+          items[*item_count].type = TYPE_FILE;
+          (*item_count)++;
         }
       }
     } else {
-      printf("[警告] 无法打开文件 %s (错误: %lu)\n", path, GetLastError());
+      printf("  [警告] 无法打开文件 %s (错误: %lu)\n", normalized_path,
+             GetLastError());
+      // 即使无法打开，也尝试添加到列表（大小为0）
+      if (*item_count < MAX_ITEMS) {
+        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, normalized_path);
+        items[*item_count].size = 0;
+        items[*item_count].type = TYPE_FILE;
+        (*item_count)++;
+      }
     }
   }
 
@@ -2225,7 +2278,7 @@ void run_grouping_test(char *paths[], int path_count) {
   free_group_result(&result);
 }
 
-// 从git status --porcelain获取文件路径（修复版）
+// 修改：完全重写的git状态路径获取函数，解决路径访问问题
 char **get_git_status_paths(int *path_count) {
   printf("[Git] 正在执行 git status --porcelain...\n");
 
@@ -2246,6 +2299,7 @@ char **get_git_status_paths(int *path_count) {
     // "?? newfile.txt"
     // " R oldfile.txt -> newfile.txt"
     // "?? \"file with spaces.txt\""
+    // " M 目录名/"  <-- 目录后面有斜杠
 
     char *path_start = line;
 
@@ -2277,6 +2331,7 @@ char **get_git_status_paths(int *path_count) {
     char *arrow_pos = strstr(path_start, " -> ");
     if (arrow_pos) {
       path_start = arrow_pos + 4; // 跳过 " -> "
+      len = strlen(path_start);
     }
 
     // 现在处理路径，可能被引号包围
@@ -2286,6 +2341,7 @@ char **get_git_status_paths(int *path_count) {
     if (len >= 2 && path_start[0] == '"' && path_start[len - 1] == '"') {
       path_start[len - 1] = '\0';  // 去除结尾引号
       final_path = path_start + 1; // 跳过开头引号
+      len -= 2;
     }
 
     // 去除可能的前后空格
@@ -2302,34 +2358,94 @@ char **get_git_status_paths(int *path_count) {
 
     // 如果路径不为空，则添加到列表中
     if (strlen(trimmed_path) > 0) {
-      // 检查路径是否存在（可选，用于调试）
-      DWORD attr = GetFileAttributesA(trimmed_path);
-      if (attr == INVALID_FILE_ATTRIBUTES) {
-        printf("  [警告] 路径不存在或无法访问: '%s'\n", trimmed_path);
-        // 继续添加，让后续处理决定如何处理
+      // 新的处理逻辑：不再检查路径是否存在，直接根据Git状态处理
+
+      // 检查是否是目录指示（以斜杠结尾）
+      int is_directory_indicated = 0;
+      size_t trimmed_len = strlen(trimmed_path);
+      if (trimmed_len > 0 && (trimmed_path[trimmed_len - 1] == '/' ||
+                              trimmed_path[trimmed_len - 1] == '\\')) {
+        is_directory_indicated = 1;
+
+        // 确保目录路径格式正确（使用反斜杠）
+        char dir_path[MAX_PATH_LENGTH];
+        strcpy_s(dir_path, MAX_PATH_LENGTH, trimmed_path);
+
+        // 替换所有正斜杠为反斜杠
+        for (char *p = dir_path; *p; p++) {
+          if (*p == '/')
+            *p = '\\';
+        }
+
+        // 确保以反斜杠结尾
+        size_t dir_len = strlen(dir_path);
+        if (dir_len > 0 && dir_path[dir_len - 1] != '\\') {
+          if (dir_len < MAX_PATH_LENGTH - 1) {
+            strcat_s(dir_path, MAX_PATH_LENGTH, "\\");
+          }
+        }
+
+        paths[*path_count] = (char *)safe_malloc(strlen(dir_path) + 1);
+        strcpy(paths[*path_count], dir_path);
+        (*path_count)++;
+        printf("  [目录] 添加目录路径: '%s'\n", dir_path);
+      } else {
+        // 文件路径
+        char file_path[MAX_PATH_LENGTH];
+        strcpy_s(file_path, MAX_PATH_LENGTH, trimmed_path);
+
+        // 替换所有正斜杠为反斜杠
+        for (char *p = file_path; *p; p++) {
+          if (*p == '/')
+            *p = '\\';
+        }
+
+        paths[*path_count] = (char *)safe_malloc(strlen(file_path) + 1);
+        strcpy(paths[*path_count], file_path);
+        (*path_count)++;
+        printf("  [文件] 添加文件路径: '%s'\n", file_path);
       }
-
-      paths[*path_count] = (char *)safe_malloc(strlen(trimmed_path) + 1);
-      strcpy(paths[*path_count], trimmed_path);
-      (*path_count)++;
-
-      printf("  [调试] 解析到文件: '%s'\n", trimmed_path);
     }
   }
 
   _pclose(pipe);
 
-  printf("[Git] 找到 %d 个变更文件\n", *path_count);
+  printf("[Git] 找到 %d 个变更项\n", *path_count);
 
   // 打印所有找到的文件用于调试
   if (*path_count > 0) {
-    printf("[Git] 文件列表:\n");
+    printf("[Git] 变更项列表:\n");
     for (int i = 0; i < *path_count; i++) {
-      printf("  %d. '%s'\n", i + 1, paths[i]);
+      DWORD attr = GetFileAttributesA(paths[i]);
+      if (attr == INVALID_FILE_ATTRIBUTES) {
+        printf("  %d. '%s' [无法访问]\n", i + 1, paths[i]);
+      } else if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+        printf("  %d. '%s' [目录]\n", i + 1, paths[i]);
+      } else {
+        printf("  %d. '%s' [文件]\n", i + 1, paths[i]);
+      }
     }
   }
 
   return paths;
+}
+
+// 新增：专门为目录路径准备的规范化函数
+void normalize_directory_path(char *path) {
+  if (!path || strlen(path) == 0)
+    return;
+
+  // 首先调用基本规范化
+  normalize_path(path);
+
+  // 确保目录路径以反斜杠结尾
+  size_t len = strlen(path);
+  if (len > 0 && path[len - 1] != '\\') {
+    if (len < MAX_PATH_LENGTH - 1) {
+      path[len] = '\\';
+      path[len + 1] = '\0';
+    }
+  }
 }
 
 // 释放git状态路径内存

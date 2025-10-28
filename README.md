@@ -125,3 +125,34 @@ other: 调整打印顺序
 [警告] 部分.gitignore文件更新失败
 消除警告，因为不一定全部文件都需要拆分
 需要修改或者添加的函数完整输出出来
+
+[Git] 正在执行 git status --porcelain...
+  [调试] 解析到文件: 'README.md'
+  [调试] 解析到文件: 'group-file.c'
+  [调试] 解析到文件: 'group-file.exe'
+  [警告] 路径不存在或无法访问: '大文件/'
+  [调试] 解析到文件: '大文件/'
+[Git] 找到 4 个变更文件
+[Git] 文件列表:
+  1. 'README.md'
+  2. 'group-file.c'
+  3. 'group-file.exe'
+  4. '大文件/'
+分析[警告] 路径不存在或无法访问: '大文件/'的原因，如果有解决方案
+需要修改或者添加的函数完整输出出来
+
+[Git] 正在执行 git status --porcelain...
+  [信息] 找到文件: 'README.md'
+  [信息] 找到文件: 'group-file.c'
+  [信息] 找到文件: 'group-file.exe'
+  [信息] 路径可能为新文件或重命名: '大文件/'
+  [信息] 找到文件: '大文件/'
+[Git] 找到 4 个变更项
+[Git] 变更项列表:
+  1. 'README.md'
+  2. 'group-file.c'
+  3. 'group-file.exe'
+  4. '大文件/'
+依旧是attr == INVALID_FILE_ATTRIBUTES
+移除结尾的斜杠后也是如此
+需要修改或者添加的函数完整输出出来
