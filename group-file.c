@@ -105,7 +105,7 @@ void collect_split_directory_files(const wchar_t *wdir_path, FileItem *items,
                                    int *item_count);
 
 int is_split_complete(const char *file_path, const char *split_dir,
-                               long long file_size);
+                      long long file_size);
 
 // 安全的内存分配函数
 void *safe_malloc(size_t size) {
@@ -963,10 +963,10 @@ int clear_directory(const wchar_t *wdir_path) {
 
 // 修改：拆分大文件的函数，添加完整性检查
 int split_large_file(const char *file_path, const char *split_dir,
-                              long long file_size) {
+                     long long file_size) {
   printf("    正在处理大文件拆分...\n");
 
-  // 首先检查拆分是否已经完整
+  // 首先检查拆分是否已经完整（双重检查）
   if (is_split_complete(file_path, split_dir, file_size)) {
     printf("    [信息] 拆分目录已存在且完整，跳过拆分步骤\n");
     return 1;
@@ -1124,9 +1124,18 @@ int split_large_file(const char *file_path, const char *split_dir,
   free(wfile_path);
   free(wsplit_dir);
 
+  // 最终验证拆分是否完整
   if (success_parts == total_parts) {
     printf("    [成功] 文件拆分完成，共 %d 个部分\n", total_parts);
-    return 1;
+
+    // 最终完整性检查
+    if (is_split_complete(file_path, split_dir, file_size)) {
+      printf("    [验证] 拆分完整性验证通过\n");
+      return 1;
+    } else {
+      printf("    [警告] 拆分完整性验证失败\n");
+      return 0;
+    }
   } else {
     printf("    [警告] 文件拆分部分成功: %d/%d 个部分\n", success_parts,
            total_parts);
@@ -1136,7 +1145,7 @@ int split_large_file(const char *file_path, const char *split_dir,
 
 // 新增：检查拆分目录是否完整的函数（改进版）
 int is_split_complete(const char *file_path, const char *split_dir,
-                               long long file_size) {
+                      long long file_size) {
   // 转换路径为宽字符
   wchar_t *wsplit_dir = char_to_wchar(split_dir);
   if (!wsplit_dir)
@@ -1250,81 +1259,101 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
     printf("%3d. %s\n", i + 1, result->skipped_files[i].path);
     printf("     大小: %s\n", size_str);
 
-    // 备份文件
-    printf("    正在备份...\n");
-    if (copy_file_with_backup(result->skipped_files[i].path, backup_base_dir)) {
-      backup_success_count++;
+    // 构建拆分目录路径
+    char split_dir[MAX_PATH_LENGTH];
+    snprintf(split_dir, MAX_PATH_LENGTH, "%s-split",
+             result->skipped_files[i].path);
 
-      // 新增：拆分大文件
-      printf("    正在准备拆分大文件...\n");
+    // 检查是否需要拆分
+    int needs_split =
+        !is_split_complete(result->skipped_files[i].path, split_dir,
+                           result->skipped_files[i].size);
 
-      // 构建拆分目录路径
-      char split_dir[MAX_PATH_LENGTH];
-      snprintf(split_dir, MAX_PATH_LENGTH, "%s-split",
-               result->skipped_files[i].path);
+    if (needs_split) {
+      printf("    需要拆分大文件...\n");
 
-      // 检查是否需要拆分（现在总是重新拆分以确保完整性）
-
-      if (!is_split_complete(result->skipped_files[i].path, split_dir,
-                                      result->skipped_files[i].size)) {
-        printf("    开始拆分大文件...\n");
-        if (split_large_file(result->skipped_files[i].path, split_dir,
-                                      result->skipped_files[i].size)) {
-          split_success_count++;
-          printf("    [成功] 大文件拆分完成\n");
-
-          // 记录拆分目录路径，后续添加到分组
-          if (additional.split_count < MAX_ITEMS) {
-            additional.split_files[additional.split_count] =
-                (char *)safe_malloc(strlen(split_dir) + 1);
-            strcpy(additional.split_files[additional.split_count], split_dir);
-            additional.split_count++;
-          }
-
-          // 更新.gitignore文件以忽略原文件
-          if (update_gitignore_for_skipped_file(
-                  result->skipped_files[i].path)) {
-            gitignore_update_count++;
-
-            // 记录.gitignore文件路径，后续添加到分组
-            char gitignore_path[MAX_PATH_LENGTH];
-            char dir_path[MAX_PATH_LENGTH];
-            strcpy_s(dir_path, MAX_PATH_LENGTH, result->skipped_files[i].path);
-
-            // 找到最后一个路径分隔符
-            char *last_slash = strrchr(dir_path, '\\');
-            if (!last_slash) {
-              last_slash = strrchr(dir_path, '/');
-            }
-
-            if (last_slash) {
-              *last_slash = '\0';
-              snprintf(gitignore_path, MAX_PATH_LENGTH, "%s\\.gitignore",
-                       dir_path);
-
-              if (additional.gitignore_count < MAX_ITEMS) {
-                additional.gitignore_files[additional.gitignore_count] =
-                    (char *)safe_malloc(strlen(gitignore_path) + 1);
-                strcpy(additional.gitignore_files[additional.gitignore_count],
-                       gitignore_path);
-                additional.gitignore_count++;
-              }
-            }
-          }
-        } else {
-          printf("    [失败] 大文件拆分失败\n");
-        }
-      } else {
-        printf("    [信息] 大文件已拆分且完整，跳过拆分步骤\n");
+      // 先进行拆分
+      if (split_large_file(result->skipped_files[i].path, split_dir,
+                           result->skipped_files[i].size)) {
         split_success_count++;
+        printf("    [成功] 大文件拆分完成\n");
 
-        // 即使已拆分，也要记录拆分目录
+        // 拆分完成后进行备份
+        printf("    正在备份原文件...\n");
+        if (copy_file_with_backup(result->skipped_files[i].path,
+                                  backup_base_dir)) {
+          backup_success_count++;
+          printf("    [成功] 原文件备份完成\n");
+        } else {
+          printf("    [警告] 原文件备份失败\n");
+        }
+
+        // 记录拆分目录路径，后续添加到分组
         if (additional.split_count < MAX_ITEMS) {
           additional.split_files[additional.split_count] =
               (char *)safe_malloc(strlen(split_dir) + 1);
           strcpy(additional.split_files[additional.split_count], split_dir);
           additional.split_count++;
         }
+
+        // 更新.gitignore文件以忽略原文件
+        if (update_gitignore_for_skipped_file(result->skipped_files[i].path)) {
+          gitignore_update_count++;
+
+          // 记录.gitignore文件路径，后续添加到分组
+          char gitignore_path[MAX_PATH_LENGTH];
+          char dir_path[MAX_PATH_LENGTH];
+          strcpy_s(dir_path, MAX_PATH_LENGTH, result->skipped_files[i].path);
+
+          // 找到最后一个路径分隔符
+          char *last_slash = strrchr(dir_path, '\\');
+          if (!last_slash) {
+            last_slash = strrchr(dir_path, '/');
+          }
+
+          if (last_slash) {
+            *last_slash = '\0';
+            snprintf(gitignore_path, MAX_PATH_LENGTH, "%s\\.gitignore",
+                     dir_path);
+
+            if (additional.gitignore_count < MAX_ITEMS) {
+              additional.gitignore_files[additional.gitignore_count] =
+                  (char *)safe_malloc(strlen(gitignore_path) + 1);
+              strcpy(additional.gitignore_files[additional.gitignore_count],
+                     gitignore_path);
+              additional.gitignore_count++;
+            }
+          }
+        }
+      } else {
+        printf("    [失败] 大文件拆分失败，跳过备份和.gitignore更新\n");
+      }
+    } else {
+      printf("    [信息] 大文件已拆分且完整，跳过拆分步骤\n");
+      split_success_count++;
+
+      // 即使已拆分，也要记录拆分目录
+      if (additional.split_count < MAX_ITEMS) {
+        additional.split_files[additional.split_count] =
+            (char *)safe_malloc(strlen(split_dir) + 1);
+        strcpy(additional.split_files[additional.split_count], split_dir);
+        additional.split_count++;
+      }
+
+      // 检查是否需要备份（如果原文件仍然存在）
+      DWORD attr = GetFileAttributesA(result->skipped_files[i].path);
+      if (attr != INVALID_FILE_ATTRIBUTES &&
+          !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        printf("    原文件仍然存在，进行备份...\n");
+        if (copy_file_with_backup(result->skipped_files[i].path,
+                                  backup_base_dir)) {
+          backup_success_count++;
+          printf("    [成功] 原文件备份完成\n");
+        } else {
+          printf("    [警告] 原文件备份失败\n");
+        }
+      } else {
+        printf("    [信息] 原文件已不存在，无需备份\n");
       }
     }
 
@@ -1338,26 +1367,26 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
   format_size(total_skipped_size, total_skipped_str, sizeof(total_skipped_str));
 
   printf("\n跳过大文件总大小: %s\n", total_skipped_str);
+  printf("需要拆分的文件: %d/%d 个\n", split_success_count,
+         result->skipped_count);
   printf("备份成功: %d/%d 个文件\n", backup_success_count,
          result->skipped_count);
-  printf("拆分成功: %d/%d 个文件\n", split_success_count,
-         result->skipped_count);
   printf(".gitignore更新: %d/%d 个目录\n", gitignore_update_count,
-         backup_success_count);
+         result->skipped_count);
 
   if (backup_success_count < result->skipped_count) {
     printf("[警告] 部分文件备份失败，请检查权限和磁盘空间\n");
   } else if (backup_success_count > 0) {
-    printf("[成功] 所有大文件已备份到: %s-backup\n", git_repo_path);
+    printf("[成功] 所有需要备份的大文件已备份到: %s-backup\n", git_repo_path);
   }
 
   if (split_success_count < result->skipped_count) {
     printf("[警告] 部分大文件拆分失败\n");
   } else if (split_success_count > 0) {
-    printf("[成功] 所有大文件已拆分完成\n");
+    printf("[成功] 所有大文件拆分处理完成\n");
   }
 
-  if (gitignore_update_count < backup_success_count) {
+  if (gitignore_update_count < result->skipped_count) {
     printf("[警告] 部分.gitignore文件更新失败\n");
   } else if (gitignore_update_count > 0) {
     printf("[成功] 所有相关.gitignore文件已更新\n");
