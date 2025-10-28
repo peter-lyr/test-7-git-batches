@@ -104,6 +104,9 @@ int update_gitignore_for_skipped_file(const char *skipped_file_path);
 void collect_split_directory_files(const wchar_t *wdir_path, FileItem *items,
                                    int *item_count);
 
+int is_split_complete(const char *file_path, const char *split_dir,
+                               long long file_size);
+
 // 安全的内存分配函数
 void *safe_malloc(size_t size) {
   void *ptr = malloc(size);
@@ -958,10 +961,16 @@ int clear_directory(const wchar_t *wdir_path) {
   return success;
 }
 
-// 修改：拆分大文件的函数，添加清空目录逻辑
+// 修改：拆分大文件的函数，添加完整性检查
 int split_large_file(const char *file_path, const char *split_dir,
-                     long long file_size) {
-  printf("    正在拆分大文件...\n");
+                              long long file_size) {
+  printf("    正在处理大文件拆分...\n");
+
+  // 首先检查拆分是否已经完整
+  if (is_split_complete(file_path, split_dir, file_size)) {
+    printf("    [信息] 拆分目录已存在且完整，跳过拆分步骤\n");
+    return 1;
+  }
 
   // 转换路径为宽字符
   wchar_t *wfile_path = char_to_wchar(file_path);
@@ -976,11 +985,11 @@ int split_large_file(const char *file_path, const char *split_dir,
     return 0;
   }
 
-  // 检查拆分目录是否存在
+  // 检查拆分目录是否存在，如果存在且不完整则清空
   DWORD dir_attr = GetFileAttributesW(wsplit_dir);
   if (dir_attr != INVALID_FILE_ATTRIBUTES &&
       (dir_attr & FILE_ATTRIBUTE_DIRECTORY)) {
-    printf("    拆分目录已存在，正在清空...\n");
+    printf("    拆分目录已存在但不完整，正在清空...\n");
     if (!clear_directory(wsplit_dir)) {
       printf("    [警告] 清空拆分目录失败，继续尝试拆分...\n");
     } else {
@@ -1125,23 +1134,75 @@ int split_large_file(const char *file_path, const char *split_dir,
   }
 }
 
-// 修改：检查拆分目录是否完整的函数，现在只检查目录存在性
+// 新增：检查拆分目录是否完整的函数（改进版）
 int is_split_complete(const char *file_path, const char *split_dir,
-                      long long file_size) {
-  // 如果拆分目录不存在，需要拆分
+                               long long file_size) {
+  // 转换路径为宽字符
   wchar_t *wsplit_dir = char_to_wchar(split_dir);
   if (!wsplit_dir)
     return 0;
 
+  // 检查拆分目录是否存在
   DWORD attr = GetFileAttributesW(wsplit_dir);
-  free(wsplit_dir);
-
   if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+    free(wsplit_dir);
     return 0; // 目录不存在，需要拆分
   }
 
-  // 目录存在，但我们总是重新拆分以确保完整性
-  return 0;
+  // 计算拆分目录中所有文件的总大小
+  long long split_total_size = 0;
+  int part_count = 0;
+
+  wchar_t search_path[MAX_PATH_LENGTH];
+  if (!safe_path_join(search_path, MAX_PATH_LENGTH, wsplit_dir, L"*")) {
+    free(wsplit_dir);
+    return 0;
+  }
+
+  WIN32_FIND_DATAW find_data;
+  HANDLE hFind = FindFirstFileW(search_path, &find_data);
+
+  if (hFind != INVALID_HANDLE_VALUE) {
+    do {
+      if (wcscmp(find_data.cFileName, L".") == 0 ||
+          wcscmp(find_data.cFileName, L"..") == 0) {
+        continue;
+      }
+
+      if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        // 是文件，累加大小
+        ULARGE_INTEGER part_size;
+        part_size.LowPart = find_data.nFileSizeLow;
+        part_size.HighPart = find_data.nFileSizeHigh;
+        split_total_size += part_size.QuadPart;
+        part_count++;
+      }
+    } while (FindNextFileW(hFind, &find_data));
+
+    FindClose(hFind);
+  }
+
+  free(wsplit_dir);
+
+  // 检查拆分是否完整
+  if (part_count == 0) {
+    return 0; // 目录为空，需要拆分
+  }
+
+  // 允许1%的大小误差（考虑到文件系统可能的一些微小差异）
+  long long size_difference = llabs(split_total_size - file_size);
+  double difference_ratio = (double)size_difference / file_size;
+
+  printf("    拆分检查: 原文件 %lld bytes, 拆分文件 %lld bytes, 差异 %.4f%%\n",
+         file_size, split_total_size, difference_ratio * 100);
+
+  if (difference_ratio > 0.01) { // 超过1%的差异认为不完整
+    printf("    文件大小不匹配，需要重新拆分\n");
+    return 0;
+  }
+
+  printf("    拆分目录完整，跳过拆分步骤\n");
+  return 1;
 }
 
 AdditionalFiles print_skipped_files(GroupResult *result) {
@@ -1203,11 +1264,12 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
                result->skipped_files[i].path);
 
       // 检查是否需要拆分（现在总是重新拆分以确保完整性）
+
       if (!is_split_complete(result->skipped_files[i].path, split_dir,
-                             result->skipped_files[i].size)) {
+                                      result->skipped_files[i].size)) {
         printf("    开始拆分大文件...\n");
         if (split_large_file(result->skipped_files[i].path, split_dir,
-                             result->skipped_files[i].size)) {
+                                      result->skipped_files[i].size)) {
           split_success_count++;
           printf("    [成功] 大文件拆分完成\n");
 
@@ -1253,7 +1315,7 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
           printf("    [失败] 大文件拆分失败\n");
         }
       } else {
-        printf("    [信息] 大文件已拆分，跳过拆分步骤\n");
+        printf("    [信息] 大文件已拆分且完整，跳过拆分步骤\n");
         split_success_count++;
 
         // 即使已拆分，也要记录拆分目录
