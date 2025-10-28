@@ -109,6 +109,8 @@ int is_split_complete(const char *file_path, const char *split_dir,
 
 void normalize_directory_path(char *path);
 
+void print_detailed_group_info(const FileGroup *group, int group_index);
+
 // 安全的内存分配函数
 void *safe_malloc(size_t size) {
   void *ptr = malloc(size);
@@ -892,7 +894,7 @@ GroupResult group_files(FileItem *items, int item_count) {
   return result;
 }
 
-// 打印分组结果
+// 修改：在print_groups函数中调用详细分组信息
 void print_groups(const GroupResult *result) {
   printf("\n========================================\n");
   printf("              分组结果\n");
@@ -904,47 +906,7 @@ void print_groups(const GroupResult *result) {
                            : max_groups_to_show;
 
   for (int i = 0; i < groups_to_show; i++) {
-    printf("分组 %d:\n", i + 1);
-
-    char size_str[32];
-    format_size(result->groups[i].total_size, size_str, sizeof(size_str));
-    printf("  总大小: %s\n", size_str);
-
-    // 计算使用率
-    double usage_rate =
-        (double)result->groups[i].total_size / MAX_GROUP_SIZE * 100;
-
-    printf("  使用率: %.1f%% (%.2f/%.2f MB)\n", usage_rate,
-           result->groups[i].total_size / (1024.0 * 1024.0),
-           MAX_GROUP_SIZE / (1024.0 * 1024.0));
-
-    int file_count = 0, dir_count = 0;
-    for (int j = 0; j < result->groups[i].count; j++) {
-      if (result->groups[i].items[j].type == TYPE_FILE) {
-        file_count++;
-      } else {
-        dir_count++;
-      }
-    }
-    printf("  包含: %d 个文件, %d 个文件夹\n", file_count, dir_count);
-
-    printf("  前5个项:\n");
-    int items_to_show =
-        result->groups[i].count < 5 ? result->groups[i].count : 5;
-    for (int j = 0; j < items_to_show; j++) {
-      const char *type_str =
-          result->groups[i].items[j].type == TYPE_FILE ? "文件" : "文件夹";
-      char item_size_str[32];
-      format_size(result->groups[i].items[j].size, item_size_str,
-                  sizeof(item_size_str));
-
-      printf("    [%s] %s (%s)\n", type_str, result->groups[i].items[j].path,
-             item_size_str);
-    }
-    if (result->groups[i].count > 5) {
-      printf("    ... 还有 %d 个项\n", result->groups[i].count - 5);
-    }
-    printf("\n");
+    print_detailed_group_info(&result->groups[i], i);
   }
 
   if (result->group_count > max_groups_to_show) {
@@ -2067,7 +2029,7 @@ GroupResult process_input_paths(char *paths[], int path_count,
   return result;
 }
 
-// 修改命令执行部分，使用宽字符版本的命令
+// 修改：在执行git add命令时打印文件大小信息
 void execute_git_commands(const GroupResult *result,
                           const char *commit_info_file) {
   printf("\n========================================\n");
@@ -2095,10 +2057,22 @@ void execute_git_commands(const GroupResult *result,
     printf("\n处理分组 %d/%d (包含 %d 个项):\n", group_idx + 1,
            result->group_count, group->count);
 
+    // 计算当前分组的总大小
+    long long current_group_total_size = 0;
+    for (int i = 0; i < group->count; i++) {
+      current_group_total_size += group->items[i].size;
+    }
+
+    char group_total_size_str[32];
+    format_size(current_group_total_size, group_total_size_str,
+                sizeof(group_total_size_str));
+    printf("  分组总大小: %s\n", group_total_size_str);
+
     // 使用宽字符构建命令
     wchar_t command_buffer[32768] = L"git add";
     size_t buffer_len = wcslen(command_buffer);
     int current_command_path_count = 0;
+    long long current_command_total_size = 0; // 当前命令添加的文件总大小
 
     for (int item_idx = 0; item_idx < group->count; item_idx++) {
       const FileItem *item = &group->items[item_idx];
@@ -2126,7 +2100,11 @@ void execute_git_commands(const GroupResult *result,
 
       // 检查是否超过命令长度限制
       if (buffer_len + quoted_path_len >= 4000) {
-        printf("  执行命令: git add [%d个路径]\n", current_command_path_count);
+        char command_size_str[32];
+        format_size(current_command_total_size, command_size_str,
+                    sizeof(command_size_str));
+        printf("  执行命令: git add [%d个路径, 总大小: %s]\n",
+               current_command_path_count, command_size_str);
 
         int ret = _wsystem(command_buffer);
         total_commands++;
@@ -2148,6 +2126,7 @@ void execute_git_commands(const GroupResult *result,
         buffer_len = wcslen(command_buffer);
         total_paths_processed += current_command_path_count;
         current_command_path_count = 0;
+        current_command_total_size = 0;
       }
 
       // 添加路径到命令
@@ -2155,6 +2134,13 @@ void execute_git_commands(const GroupResult *result,
         wcscat_s(command_buffer, _countof(command_buffer), quoted_path);
         buffer_len += quoted_path_len;
         current_command_path_count++;
+        current_command_total_size += item->size;
+
+        // 打印当前添加的文件信息
+        char item_size_str[32];
+        format_size(item->size, item_size_str, sizeof(item_size_str));
+        const char *type_str = item->type == TYPE_FILE ? "文件" : "文件夹";
+        printf("    添加%s: %s (%s)\n", type_str, item->path, item_size_str);
       }
 
       free(wpath);
@@ -2162,7 +2148,11 @@ void execute_git_commands(const GroupResult *result,
 
     // 执行分组最后一个命令（如果有内容）
     if (current_command_path_count > 0) {
-      printf("  执行命令: git add [%d个路径]\n", current_command_path_count);
+      char command_size_str[32];
+      format_size(current_command_total_size, command_size_str,
+                  sizeof(command_size_str));
+      printf("  执行命令: git add [%d个路径, 总大小: %s]\n",
+             current_command_path_count, command_size_str);
 
       int ret = _wsystem(command_buffer);
       total_commands++;
@@ -2231,6 +2221,49 @@ void execute_git_commands(const GroupResult *result,
   printf("  成功率: %.1f%%\n",
          total_commands > 0 ? (double)success_commands / total_commands * 100
                             : 0.0);
+}
+
+// 新增：辅助函数，用于在分组信息中显示更详细的大小信息
+void print_detailed_group_info(const FileGroup *group, int group_index) {
+  printf("分组 %d 详细信息:\n", group_index + 1);
+
+  long long total_size = 0;
+  int file_count = 0, dir_count = 0;
+
+  for (int i = 0; i < group->count; i++) {
+    total_size += group->items[i].size;
+    if (group->items[i].type == TYPE_FILE) {
+      file_count++;
+    } else {
+      dir_count++;
+    }
+  }
+
+  char size_str[32];
+  format_size(total_size, size_str, sizeof(size_str));
+
+  printf("  总大小: %s\n", size_str);
+  printf("  包含: %d 个文件, %d 个文件夹\n", file_count, dir_count);
+
+  // 显示使用率
+  double usage_rate = (double)total_size / MAX_GROUP_SIZE * 100;
+  printf("  使用率: %.1f%%\n", usage_rate);
+
+  // 显示前几个大文件
+  printf("  主要文件:\n");
+  int items_to_show = group->count < 3 ? group->count : 3;
+  for (int i = 0; i < items_to_show; i++) {
+    char item_size_str[32];
+    format_size(group->items[i].size, item_size_str, sizeof(item_size_str));
+    const char *type_str =
+        group->items[i].type == TYPE_FILE ? "文件" : "文件夹";
+    printf("    [%s] %s (%s)\n", type_str, group->items[i].path, item_size_str);
+  }
+
+  if (group->count > 3) {
+    printf("    ... 还有 %d 个项\n", group->count - 3);
+  }
+  printf("\n");
 }
 
 // 修改run_grouping_test_with_git函数，调整调用顺序
