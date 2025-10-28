@@ -1791,9 +1791,9 @@ void print_statistics(const GroupResult *result, long long total_scanned_size,
   printf("\n");
 
   printf("项目统计:\n");
+  printf("  分组总项数: %d 个\n", total_grouped_files + total_grouped_dirs);
   printf("  分组文件数: %d 个\n", total_grouped_files);
   printf("  分组文件夹数: %d 个\n", total_grouped_dirs);
-  printf("  分组总项数: %d 个\n", total_grouped_files + total_grouped_dirs);
   printf("\n");
 
   printf("大小统计:\n");
@@ -1802,8 +1802,8 @@ void print_statistics(const GroupResult *result, long long total_scanned_size,
   format_size(total_scanned_size, scanned_size_str, sizeof(scanned_size_str));
   format_size(skipped_files_size, skipped_size_str, sizeof(skipped_size_str));
 
-  printf("  分组总大小: %s (%.1f%%)\n", grouped_size_str, grouped_percent);
   printf("  扫描总大小: %s\n", scanned_size_str);
+  printf("  分组总大小: %s (%.1f%%)\n", grouped_size_str, grouped_percent);
   printf("  跳过大文件: %s (%.1f%%)\n", skipped_size_str, skipped_percent);
 }
 
