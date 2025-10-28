@@ -102,3 +102,5 @@ print_skipped_files的for循环跑完之后
 一起加入到分组中去
 先调用print_skipped_files再调用print_groups
 需要修改或者添加的函数完整输出出来
+
+输入总大小和分组总大小比较
