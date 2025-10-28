@@ -54,6 +54,7 @@ typedef struct {
   int gitignore_count;
   char **split_files; // 拆分文件路径
   int split_count;
+  int has_large_files; // 新增：标记是否处理过大文件
 } AdditionalFiles;
 
 // 函数声明
@@ -93,9 +94,9 @@ GroupResult process_input_paths(char *paths[], int path_count,
                                 long long *skipped_files_size);
 void execute_git_commands(const GroupResult *result,
                           const char *commit_info_file);
-void run_grouping_test_with_git(char *paths[], int path_count,
-                                const char *commit_info_file);
-void run_grouping_test(char *paths[], int path_count);
+int run_grouping_test_with_git(char *paths[], int path_count,
+                               const char *commit_info_file);
+int run_grouping_test(char *paths[], int path_count);
 char **get_git_status_paths(int *path_count);
 void free_git_status_paths(char **paths, int path_count);
 
@@ -218,6 +219,85 @@ void format_size(long long size, char *buffer, size_t buffer_size) {
   } else {
     snprintf(buffer, buffer_size, "%.2f %s", display_size, units[unit_index]);
   }
+}
+
+// 新增：检查文件夹中是否包含超过MAX_FILE_SIZE的文件
+int directory_contains_large_files(const wchar_t *wpath,
+                                   long long *total_scanned_size) {
+  int has_large_files = 0;
+  DirectoryEntry *queue = (DirectoryEntry *)safe_malloc(sizeof(DirectoryEntry) *
+                                                        MAX_DIRECTORY_QUEUE);
+  int queue_front = 0, queue_rear = 0;
+
+  wcscpy_s(queue[queue_rear].path, MAX_PATH_LENGTH, wpath);
+  queue[queue_rear].depth = 0;
+  queue_rear = (queue_rear + 1) % MAX_DIRECTORY_QUEUE;
+
+  while (queue_front != queue_rear && !has_large_files) {
+    DirectoryEntry current = queue[queue_front];
+    queue_front = (queue_front + 1) % MAX_DIRECTORY_QUEUE;
+
+    if (current.depth > 50) {
+      continue;
+    }
+
+    wchar_t search_path[MAX_PATH_LENGTH];
+    if (!safe_path_join(search_path, MAX_PATH_LENGTH, current.path, L"*")) {
+      continue;
+    }
+
+    WIN32_FIND_DATAW find_data;
+    HANDLE hFind = FindFirstFileW(search_path, &find_data);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+      continue;
+    }
+
+    do {
+      if (wcscmp(find_data.cFileName, L".") == 0 ||
+          wcscmp(find_data.cFileName, L"..") == 0) {
+        continue;
+      }
+
+      wchar_t full_path[MAX_PATH_LENGTH];
+      if (!safe_path_join(full_path, MAX_PATH_LENGTH, current.path,
+                          find_data.cFileName)) {
+        continue;
+      }
+
+      if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        if ((queue_rear + 1) % MAX_DIRECTORY_QUEUE != queue_front) {
+          wcscpy_s(queue[queue_rear].path, MAX_PATH_LENGTH, full_path);
+          queue[queue_rear].depth = current.depth + 1;
+          queue_rear = (queue_rear + 1) % MAX_DIRECTORY_QUEUE;
+        }
+      } else {
+        ULARGE_INTEGER file_size;
+        file_size.LowPart = find_data.nFileSizeLow;
+        file_size.HighPart = find_data.nFileSizeHigh;
+        *total_scanned_size += file_size.QuadPart;
+
+        // 检查文件大小是否超过限制
+        if (file_size.QuadPart > MAX_FILE_SIZE) {
+          has_large_files = 1;
+          char *char_path = wchar_to_char(full_path);
+          if (char_path) {
+            printf("       发现大文件: %s", char_path);
+            char size_str[32];
+            format_size(file_size.QuadPart, size_str, sizeof(size_str));
+            printf(" (%s)\n", size_str);
+            free(char_path);
+          }
+          break; // 发现一个大文件就停止检查
+        }
+      }
+    } while (FindNextFileW(hFind, &find_data) && !has_large_files);
+
+    FindClose(hFind);
+  }
+
+  free(queue);
+  return has_large_files;
 }
 
 // 绘制纯文本进度条
@@ -569,7 +649,7 @@ int copy_file_with_backup(const char *src_path, const char *backup_base_path) {
   }
 }
 
-// 修改：改进的迭代收集函数，避免目录重复添加
+// 修改：改进的迭代收集函数，避免目录重复添加，正确处理大文件
 void collect_items_iterative(const wchar_t *wpath, FileItem *items,
                              int *item_count, long long *total_scanned_size,
                              long long *skipped_files_size,
@@ -697,7 +777,7 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
   free(queue);
 }
 
-// 修改：改进的路径处理函数，统一目录处理逻辑
+// 修改：改进的路径处理函数，检查文件夹是否包含大文件
 void process_input_path(const char *path, FileItem *items, int *item_count,
                         long long *total_input_size,
                         long long *total_scanned_size,
@@ -777,9 +857,15 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
     format_size(dir_size, size_str, sizeof(size_str));
     printf("       文件夹大小: %s\n", size_str);
 
-    // 修改：统一目录处理逻辑，避免重复添加
-    if (dir_size <= MAX_GROUP_SIZE) {
-      printf("       文件夹大小合适，直接添加...\n");
+    // 修改：检查文件夹是否包含大文件
+    printf("       检查文件夹是否包含大文件...\n");
+    long long temp_scanned_size = 0;
+    int has_large_files =
+        directory_contains_large_files(wpath, &temp_scanned_size);
+
+    // 只有在文件夹大小合适且不包含大文件时才直接添加
+    if (dir_size <= MAX_GROUP_SIZE && !has_large_files) {
+      printf("       文件夹大小合适且不包含大文件，直接添加...\n");
 
       if (*item_count < MAX_ITEMS) {
         // 确保目录路径格式正确
@@ -797,11 +883,17 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
         printf("       已添加目录: %s\n", dir_path);
       }
     } else {
-      printf("       文件夹太大，递归处理子项（不添加目录本身）...\n");
+      if (dir_size > MAX_GROUP_SIZE) {
+        printf("       文件夹太大 (%s > %lld MB)，递归处理子项...\n", size_str,
+               MAX_GROUP_SIZE / (1024 * 1024));
+      }
+      if (has_large_files) {
+        printf("       文件夹包含大文件，递归处理子项...\n");
+      }
     }
 
-    // 修改：无论目录大小如何，都递归扫描内容
-    // 但只在目录大小超过限制时才在递归扫描中添加文件
+    // 无论文件夹大小如何，都递归扫描内容
+    // 但只在文件夹大小超过限制或包含大文件时才在递归扫描中添加文件
     collect_items_iterative(wpath, items, item_count, total_scanned_size,
                             skipped_files_size, result);
   } else {
@@ -869,15 +961,18 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
   free(wpath);
 }
 
-// 比较函数：文件在前，文件夹在后，按大小降序
+// 修改：比较函数，确保文件夹在前，按大小降序
 int compare_items(const void *a, const void *b) {
   const FileItem *item1 = (const FileItem *)a;
   const FileItem *item2 = (const FileItem *)b;
 
+  // 文件夹优先
   if (item1->type != item2->type) {
-    return item1->type - item2->type;
+    return item2->type -
+           item1->type; // TYPE_DIRECTORY(1) - TYPE_FILE(0) = 1，文件夹在前
   }
 
+  // 按大小降序排列
   if (item1->size > item2->size)
     return -1;
   if (item1->size < item2->size)
@@ -886,7 +981,51 @@ int compare_items(const void *a, const void *b) {
   return strcmp(item1->path, item2->path);
 }
 
-// 分组算法
+// 新增：检查路径包含关系的函数
+int is_path_contained(const char *child_path, const char *parent_path) {
+  if (!child_path || !parent_path)
+    return 0;
+
+  char normalized_child[MAX_PATH_LENGTH];
+  char normalized_parent[MAX_PATH_LENGTH];
+
+  strcpy_s(normalized_child, MAX_PATH_LENGTH, child_path);
+  strcpy_s(normalized_parent, MAX_PATH_LENGTH, parent_path);
+
+  // 规范化路径
+  normalize_path(normalized_child);
+  normalize_path(normalized_parent);
+
+  // 确保父路径以反斜杠结尾以便精确匹配
+  size_t parent_len = strlen(normalized_parent);
+  if (parent_len > 0 && normalized_parent[parent_len - 1] != '\\') {
+    if (parent_len < MAX_PATH_LENGTH - 1) {
+      strcat_s(normalized_parent, MAX_PATH_LENGTH, "\\");
+    }
+  }
+
+  // 检查child_path是否以parent_path开头
+  return (strstr(normalized_child, normalized_parent) == normalized_child);
+}
+
+// 新增：检查项是否被任何已分组文件夹包含
+int is_item_contained_by_any_group(const FileItem *item,
+                                   const FileGroup *groups, int group_count) {
+  if (item->type == TYPE_FILE) {
+    for (int i = 0; i < group_count; i++) {
+      for (int j = 0; j < groups[i].count; j++) {
+        if (groups[i].items[j].type == TYPE_DIRECTORY) {
+          if (is_path_contained(item->path, groups[i].items[j].path)) {
+            return 1;
+          }
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+// 修改：改进的分组算法，避免文件夹和文件的重复分组
 GroupResult group_files(FileItem *items, int item_count) {
   GroupResult result = {0};
 
@@ -899,6 +1038,7 @@ GroupResult group_files(FileItem *items, int item_count) {
   printf("[处理] 正在排序 %d 个项...\n", item_count);
   qsort(items, item_count, sizeof(FileItem), compare_items);
 
+  // 初始化分组数组
   for (int i = 0; i < initial_group_count; i++) {
     result.groups[i].items = (FileItem *)safe_malloc(sizeof(FileItem) * 10);
     result.groups[i].count = 0;
@@ -908,9 +1048,89 @@ GroupResult group_files(FileItem *items, int item_count) {
 
   printf("[处理] 开始分组处理...\n");
 
+  // 第一遍：先添加所有合适的文件夹
+  for (int i = 0; i < item_count; i++) {
+    if (items[i].type == TYPE_DIRECTORY && items[i].size <= MAX_GROUP_SIZE) {
+      int best_group = -1;
+      long long best_remaining = MAX_GROUP_SIZE;
+
+      for (int j = 0; j < result.group_count; j++) {
+        long long remaining = MAX_GROUP_SIZE - result.groups[j].total_size;
+        if (remaining >= items[i].size && remaining < best_remaining) {
+          best_remaining = remaining;
+          best_group = j;
+        }
+      }
+
+      if (best_group != -1) {
+        FileGroup *group = &result.groups[best_group];
+
+        if (group->count >= group->capacity) {
+          int new_capacity = group->capacity * 2;
+          FileItem *new_items = (FileItem *)safe_realloc(
+              group->items, sizeof(FileItem) * new_capacity);
+          group->items = new_items;
+          group->capacity = new_capacity;
+        }
+
+        group->items[group->count++] = items[i];
+        group->total_size += items[i].size;
+
+        printf("  添加文件夹到分组 %d: %s (%lld bytes)\n", best_group + 1,
+               items[i].path, items[i].size);
+      } else {
+        if (result.group_count >= result.groups_capacity) {
+          int new_capacity = result.groups_capacity * 2;
+          FileGroup *new_groups = (FileGroup *)safe_realloc(
+              result.groups, sizeof(FileGroup) * new_capacity);
+
+          for (int k = result.group_count; k < new_capacity; k++) {
+            new_groups[k].items =
+                (FileItem *)safe_malloc(sizeof(FileItem) * 10);
+            new_groups[k].count = 0;
+            new_groups[k].capacity = 10;
+            new_groups[k].total_size = 0;
+          }
+
+          result.groups = new_groups;
+          result.groups_capacity = new_capacity;
+        }
+
+        FileGroup *new_group = &result.groups[result.group_count];
+        if (new_group->count >= new_group->capacity) {
+          int new_capacity = new_group->capacity * 2;
+          FileItem *new_items = (FileItem *)safe_realloc(
+              new_group->items, sizeof(FileItem) * new_capacity);
+          new_group->items = new_items;
+          new_group->capacity = new_capacity;
+        }
+
+        new_group->items[new_group->count++] = items[i];
+        new_group->total_size += items[i].size;
+        result.group_count++;
+
+        printf("  创建新分组 %d 并添加文件夹: %s (%lld bytes)\n",
+               result.group_count, items[i].path, items[i].size);
+      }
+    }
+  }
+
+  // 第二遍：添加未被包含的文件
   for (int i = 0; i < item_count; i++) {
     if (i % 1000 == 0 || i == item_count - 1) {
       draw_progress_bar(i + 1, item_count, "分组进度");
+    }
+
+    // 跳过文件夹（已经在第一遍处理）
+    if (items[i].type == TYPE_DIRECTORY) {
+      continue;
+    }
+
+    // 检查文件是否已经被某个分组的文件夹包含
+    if (is_item_contained_by_any_group(&items[i], result.groups,
+                                       result.group_count)) {
+      printf("  跳过已被包含的文件: %s\n", items[i].path);
+      continue;
     }
 
     int best_group = -1;
@@ -955,6 +1175,14 @@ GroupResult group_files(FileItem *items, int item_count) {
       }
 
       FileGroup *new_group = &result.groups[result.group_count];
+      if (new_group->count >= new_group->capacity) {
+        int new_capacity = new_group->capacity * 2;
+        FileItem *new_items = (FileItem *)safe_realloc(
+            new_group->items, sizeof(FileItem) * new_capacity);
+        new_group->items = new_items;
+        new_group->capacity = new_capacity;
+      }
+
       new_group->items[new_group->count++] = items[i];
       new_group->total_size += items[i].size;
       result.group_count++;
@@ -963,10 +1191,28 @@ GroupResult group_files(FileItem *items, int item_count) {
 
   printf("\n[完成] 分组完成，共 %d 个分组\n", result.group_count);
 
+  // 压缩分组数组
   if (result.group_count < result.groups_capacity) {
     result.groups = (FileGroup *)safe_realloc(
         result.groups, sizeof(FileGroup) * result.group_count);
     result.groups_capacity = result.group_count;
+  }
+
+  // 打印分组统计
+  printf("[统计] 分组详情:\n");
+  for (int i = 0; i < result.group_count; i++) {
+    int file_count = 0, dir_count = 0;
+    for (int j = 0; j < result.groups[i].count; j++) {
+      if (result.groups[i].items[j].type == TYPE_FILE) {
+        file_count++;
+      } else {
+        dir_count++;
+      }
+    }
+    char size_str[32];
+    format_size(result.groups[i].total_size, size_str, sizeof(size_str));
+    printf("  分组 %d: %s (%d文件, %d文件夹)\n", i + 1, size_str, file_count,
+           dir_count);
   }
 
   return result;
@@ -1452,11 +1698,12 @@ int delete_original_file(const char *file_path) {
   }
 }
 
-// 修改：在备份完成后删除大文件
+// 修改：在函数末尾添加处理标记
 AdditionalFiles print_skipped_files(GroupResult *result) {
   AdditionalFiles additional = {0};
   additional.gitignore_files = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
   additional.split_files = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
+  additional.has_large_files = 0; // 初始化为没有处理大文件
 
   if (result->skipped_count == 0) {
     printf("\n[信息] 没有跳过的大文件\n");
@@ -1691,6 +1938,13 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
     printf("[成功] 所有相关.gitignore文件已更新\n");
   } else {
     printf("[信息] 没有需要更新的.gitignore文件\n");
+  }
+
+  // 在处理循环结束后，设置标记
+  if (split_success_count > 0 || backup_success_count > 0 ||
+      gitignore_update_count > 0) {
+    additional.has_large_files = 1;
+    printf("\n[信息] 检测到大文件处理操作，程序将重启以重新扫描\n");
   }
 
   return additional;
@@ -2481,59 +2735,20 @@ void execute_git_commands(const GroupResult *result,
                             : 0.0);
 }
 
-// 修改：改进的分组信息显示，检查重复项
+// 修改：改进的分组信息显示，清晰显示包含关系
 void print_detailed_group_info(const FileGroup *group, int group_index) {
   printf("分组 %d 详细信息:\n", group_index + 1);
 
   long long total_size = 0;
   int file_count = 0, dir_count = 0;
 
-  // 新增：检查重复项
-  char **processed_paths = (char **)safe_malloc(sizeof(char *) * group->count);
-  int processed_count = 0;
-  int duplicate_count = 0;
-
+  // 统计基本信息
   for (int i = 0; i < group->count; i++) {
     total_size += group->items[i].size;
     if (group->items[i].type == TYPE_FILE) {
       file_count++;
     } else {
       dir_count++;
-    }
-
-    // 检查重复路径
-    int is_duplicate = 0;
-    char normalized_path[MAX_PATH_LENGTH];
-    strcpy_s(normalized_path, MAX_PATH_LENGTH, group->items[i].path);
-
-    if (group->items[i].type == TYPE_DIRECTORY) {
-      normalize_directory_path(normalized_path);
-    } else {
-      normalize_path(normalized_path);
-    }
-
-    for (int j = 0; j < processed_count; j++) {
-      char normalized_processed[MAX_PATH_LENGTH];
-      strcpy_s(normalized_processed, MAX_PATH_LENGTH, processed_paths[j]);
-
-      if (group->items[i].type == TYPE_DIRECTORY) {
-        normalize_directory_path(normalized_processed);
-      } else {
-        normalize_path(normalized_processed);
-      }
-
-      if (strcmp(normalized_path, normalized_processed) == 0) {
-        is_duplicate = 1;
-        duplicate_count++;
-        break;
-      }
-    }
-
-    if (!is_duplicate && processed_count < group->count) {
-      processed_paths[processed_count] =
-          (char *)safe_malloc(strlen(normalized_path) + 1);
-      strcpy(processed_paths[processed_count], normalized_path);
-      processed_count++;
     }
   }
 
@@ -2543,41 +2758,73 @@ void print_detailed_group_info(const FileGroup *group, int group_index) {
   printf("  总大小: %s\n", size_str);
   printf("  包含: %d 个文件, %d 个文件夹\n", file_count, dir_count);
 
-  if (duplicate_count > 0) {
-    printf("  [警告] 发现 %d 个重复项\n", duplicate_count);
-  }
-
   // 显示使用率
   double usage_rate = (double)total_size / MAX_GROUP_SIZE * 100;
   printf("  使用率: %.1f%%\n", usage_rate);
 
-  // 显示前几个大文件
-  printf("  主要文件:\n");
-  int items_to_show = group->count < 3 ? group->count : 3;
-  for (int i = 0; i < items_to_show; i++) {
-    char item_size_str[32];
-    format_size(group->items[i].size, item_size_str, sizeof(item_size_str));
-    const char *type_str =
-        group->items[i].type == TYPE_FILE ? "文件" : "文件夹";
-    printf("    [%s] %s (%s)\n", type_str, group->items[i].path, item_size_str);
+  // 按类型分别显示
+  printf("  文件夹列表:\n");
+  for (int i = 0; i < group->count; i++) {
+    if (group->items[i].type == TYPE_DIRECTORY) {
+      char item_size_str[32];
+      format_size(group->items[i].size, item_size_str, sizeof(item_size_str));
+      printf("    [文件夹] %s (%s)\n", group->items[i].path, item_size_str);
+
+      // 显示该文件夹包含的文件
+      for (int j = 0; j < group->count; j++) {
+        if (group->items[j].type == TYPE_FILE &&
+            is_path_contained(group->items[j].path, group->items[i].path)) {
+          char file_size_str[32];
+          format_size(group->items[j].size, file_size_str,
+                      sizeof(file_size_str));
+          printf("      └─ [文件] %s (%s)\n", group->items[j].path,
+                 file_size_str);
+        }
+      }
+    }
   }
 
-  if (group->count > 3) {
-    printf("    ... 还有 %d 个项\n", group->count - 3);
+  // 显示独立的文件（不被任何文件夹包含）
+  printf("  独立文件列表:\n");
+  int has_independent_files = 0;
+  for (int i = 0; i < group->count; i++) {
+    if (group->items[i].type == TYPE_FILE) {
+      int is_contained = 0;
+      for (int j = 0; j < group->count; j++) {
+        if (group->items[j].type == TYPE_DIRECTORY &&
+            is_path_contained(group->items[i].path, group->items[j].path)) {
+          is_contained = 1;
+          break;
+        }
+      }
+      if (!is_contained) {
+        char file_size_str[32];
+        format_size(group->items[i].size, file_size_str, sizeof(file_size_str));
+        printf("    [文件] %s (%s)\n", group->items[i].path, file_size_str);
+        has_independent_files = 1;
+      }
+    }
   }
 
-  // 释放内存
-  for (int i = 0; i < processed_count; i++) {
-    free(processed_paths[i]);
+  if (!has_independent_files) {
+    printf("    无独立文件\n");
   }
-  free(processed_paths);
 
   printf("\n");
 }
 
-// 修改run_grouping_test_with_git函数，调整调用顺序
-void run_grouping_test_with_git(char *paths[], int path_count,
-                                const char *commit_info_file) {
+// 新增：检查是否处理过大文件
+int has_processed_large_files(AdditionalFiles *additional) {
+  if (!additional)
+    return 0;
+
+  // 如果有拆分文件或.gitignore文件被处理，则认为处理过大文件
+  return (additional->split_count > 0 || additional->gitignore_count > 0);
+}
+
+// 修改：在处理大文件后检查是否需要重启
+int run_grouping_test_with_git(char *paths[], int path_count,
+                               const char *commit_info_file) {
   long long total_scanned_size, skipped_files_size;
 
   GroupResult result = process_input_paths(
@@ -2586,6 +2833,20 @@ void run_grouping_test_with_git(char *paths[], int path_count,
   // 先调用print_skipped_files，它会返回需要添加的额外文件
   AdditionalFiles additional = print_skipped_files(&result);
 
+  // 检查是否处理过大文件，如果是则重启程序
+  if (additional.has_large_files) {
+    printf("\n[重启] 检测到大文件处理，准备重启程序...\n");
+
+    // 释放内存
+    free_additional_files(&additional);
+    free_group_result(&result);
+
+    // 重启程序（这里需要传递argv参数，稍后在main函数中处理）
+    // 重启逻辑将在main函数中实现
+    return 1;
+  }
+
+  // 如果没有重启，继续正常流程
   // 将额外文件添加到分组中
   add_additional_files_to_groups(&result, &additional);
 
@@ -2596,26 +2857,45 @@ void run_grouping_test_with_git(char *paths[], int path_count,
                   skipped_files_size);
 
   // 执行Git操作
-  execute_git_commands(&result, commit_info_file);
+  // execute_git_commands(&result, commit_info_file);
 
   // 释放内存
   free_additional_files(&additional);
   free_group_result(&result);
+  return 0;
 }
 
-// 主测试函数（不带Git功能）
-void run_grouping_test(char *paths[], int path_count) {
+// 修改：非Git模式也添加重启检查
+int run_grouping_test(char *paths[], int path_count) {
   long long total_scanned_size, skipped_files_size;
 
   GroupResult result = process_input_paths(
       paths, path_count, &total_scanned_size, &skipped_files_size);
 
+  // 处理大文件
+  AdditionalFiles additional = print_skipped_files(&result);
+
+  // 检查是否处理过大文件，如果是则重启程序
+  if (additional.has_large_files) {
+    printf("\n[重启] 检测到大文件处理，准备重启程序...\n");
+
+    // 释放内存
+    free_additional_files(&additional);
+    free_group_result(&result);
+
+    return 1;
+  }
+
+  // 如果没有重启，继续正常流程
+  add_additional_files_to_groups(&result, &additional);
   print_groups(&result);
   print_statistics(&result, total_scanned_size, skipped_files_size);
   validate_result(&result, result.total_input_size, total_scanned_size,
                   skipped_files_size);
 
+  free_additional_files(&additional);
   free_group_result(&result);
+  return 0;
 }
 
 // 修改：完全重写的git状态路径获取函数，解决路径访问问题
@@ -2806,6 +3086,92 @@ void free_git_status_paths(char **paths, int path_count) {
   free(paths);
 }
 
+// 修改：改进重启程序函数，使用正确的命令提示符
+void restart_program(char *argv[], int has_processed_large_files) {
+  printf("\n========================================\n");
+  printf("              程序重启\n");
+  printf("========================================\n\n");
+
+  if (has_processed_large_files) {
+    printf("[信息] 检测到大文件已处理，正在重启程序以重新扫描...\n");
+
+    // 获取当前工作目录
+    char current_dir[MAX_PATH_LENGTH];
+    if (!GetCurrentDirectoryA(MAX_PATH_LENGTH, current_dir)) {
+      printf("[错误] 无法获取当前工作目录\n");
+      return;
+    }
+
+    // 获取当前程序路径
+    char exe_path[MAX_PATH_LENGTH];
+    if (GetModuleFileNameA(NULL, exe_path, MAX_PATH_LENGTH) == 0) {
+      printf("[错误] 无法获取程序路径，无法自动重启\n");
+      return;
+    }
+
+    // 构建cmd命令
+    char cmd[MAX_PATH_LENGTH * 3] = {0};
+    if (argv[1] != NULL) {
+      // 有提交信息文件参数
+      snprintf(cmd, sizeof(cmd), "cmd /k \"\"%s\" \"%s\"\"", exe_path, argv[1]);
+    } else {
+      // 没有参数
+      snprintf(cmd, sizeof(cmd), "cmd /k \"\"%s\"\"", exe_path);
+    }
+
+    printf("重启命令: %s\n", cmd);
+    printf("工作目录: %s\n", current_dir);
+
+    // 创建进程信息
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+
+    // 启动新进程（使用cmd /k 保持窗口打开）
+    if (CreateProcessA(NULL,               // 不使用模块名
+                       cmd,                // 命令行
+                       NULL,               // 进程句柄不可继承
+                       NULL,               // 线程句柄不可继承
+                       FALSE,              // 不继承句柄
+                       CREATE_NEW_CONSOLE, // 创建新控制台
+                       NULL,               // 使用父进程环境块
+                       current_dir,        // 指定工作目录
+                       &si,                // STARTUPINFO 指针
+                       &pi                 // PROCESS_INFORMATION 指针
+                       )) {
+      printf("[成功] 新进程已启动 (PID: %lu)，当前进程将退出\n",
+             pi.dwProcessId);
+
+      // 等待一段时间确保新进程启动
+      Sleep(2000);
+
+      // 关闭进程和线程句柄
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+
+      // 退出当前进程
+      exit(0);
+    } else {
+      DWORD error = GetLastError();
+      printf("[错误] 无法启动新进程 (错误代码: %lu)\n", error);
+      printf("[信息] 请手动重新运行程序\n");
+
+      // 提供手动重启的指令
+      printf("\n手动重启指令:\n");
+      if (argv[1] != NULL) {
+        printf("  \"%s\" \"%s\"\n", exe_path, argv[1]);
+      } else {
+        printf("  \"%s\"\n", exe_path);
+      }
+    }
+  } else {
+    printf("[信息] 没有大文件需要处理，无需重启\n");
+  }
+}
+
 int main(int argc, char *argv[]) {
   // 设置控制台输出为UTF-8
   SetConsoleOutputCP(CP_UTF8);
@@ -2813,6 +3179,12 @@ int main(int argc, char *argv[]) {
   printf("========================================\n");
   printf("          文件分组工具 (带Git功能)\n");
   printf("========================================\n\n");
+
+  // 显示当前工作目录用于调试
+  char current_dir[MAX_PATH_LENGTH];
+  if (GetCurrentDirectoryA(MAX_PATH_LENGTH, current_dir)) {
+    printf("当前工作目录: %s\n", current_dir);
+  }
 
   // 检查命令行参数
   const char *commit_info_file = NULL;
@@ -2852,11 +3224,20 @@ int main(int argc, char *argv[]) {
   }
   printf("\n");
 
+  int need_restart = 0;
   // 根据参数选择是否使用Git功能
   if (use_git) {
-    run_grouping_test_with_git(input_paths, path_count, commit_info_file);
+    need_restart =
+        run_grouping_test_with_git(input_paths, path_count, commit_info_file);
   } else {
-    run_grouping_test(input_paths, path_count);
+    need_restart = run_grouping_test(input_paths, path_count);
+  }
+
+  // 检查是否需要重启
+  if (need_restart) {
+    restart_program(argv, 1);
+    // 如果重启函数返回，说明重启失败，继续执行
+    printf("[警告] 重启失败，继续执行后续操作\n");
   }
 
   // 如果是动态分配的内存，需要释放
