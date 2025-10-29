@@ -240,29 +240,29 @@ int merge_part_files(const wchar_t *split_dir, const wchar_t *output_file) {
   PartFile *part_files = NULL;
   int file_count = 0;
   if (!get_part_files(split_dir, &part_files, &file_count)) {
-    printf("Error: Could not find part files in directory\n");
+    printf("  ❌ Could not find part files in directory\n");
     return 0;
   }
   if (file_count == 0) {
-    printf("Error: No part files found in directory\n");
+    printf("  ❌ No part files found in directory\n");
     free(part_files);
     return 0;
   }
-  printf("Found %d part files to merge\n", file_count);
+  printf("  📁 Found %d part files to merge\n", file_count);
   wchar_t output_dir[MAX_PATH_LENGTH];
   wcscpy_s(output_dir, MAX_PATH_LENGTH, output_file);
   wchar_t *last_slash = wcsrchr(output_dir, L'\\');
   if (last_slash) {
     *last_slash = L'\0';
     if (!create_directory_recursive(output_dir)) {
-      printf("Warning: Could not create output directory structure\n");
+      printf("  ⚠️  Could not create output directory structure\n");
     }
   }
   HANDLE hOutput = CreateFileW(output_file, GENERIC_WRITE, 0, NULL,
                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (hOutput == INVALID_HANDLE_VALUE) {
     DWORD error = GetLastError();
-    printf("Error: Could not create output file (error: %lu)\n", error);
+    printf("  ❌ Could not create output file (error: %lu)\n", error);
     free(part_files);
     return 0;
   }
@@ -271,7 +271,7 @@ int merge_part_files(const wchar_t *split_dir, const wchar_t *output_file) {
   long long total_written = 0;
   for (int i = 0; i < file_count && success; i++) {
     char *part_path_char = wchar_to_char(part_files[i].path);
-    printf("Merging part %d/%d: %s\n", i + 1, file_count,
+    printf("  🔄 Merging part %d/%d: %s\n", i + 1, file_count,
            part_path_char ? part_path_char : "[Unable to display path]");
     if (part_path_char)
       free(part_path_char);
@@ -280,7 +280,7 @@ int merge_part_files(const wchar_t *split_dir, const wchar_t *output_file) {
                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hPart == INVALID_HANDLE_VALUE) {
       DWORD error = GetLastError();
-      printf("Error: Could not open part file (error: %lu)\n", error);
+      printf("  ❌ Could not open part file (error: %lu)\n", error);
       success = 0;
       continue;
     }
@@ -289,7 +289,7 @@ int merge_part_files(const wchar_t *split_dir, const wchar_t *output_file) {
            bytes_read > 0) {
       if (!WriteFile(hOutput, buffer, bytes_read, &bytes_written, NULL) ||
           bytes_written != bytes_read) {
-        printf("Error: Write failed for part file\n");
+        printf("  ❌ Write failed for part file\n");
         success = 0;
         break;
       }
@@ -297,27 +297,27 @@ int merge_part_files(const wchar_t *split_dir, const wchar_t *output_file) {
     }
     CloseHandle(hPart);
     if (success) {
-      printf("  Successfully merged part %d\n", part_files[i].part_number);
+      printf("  ✅ Successfully merged part %d\n", part_files[i].part_number);
     }
   }
   free(buffer);
   CloseHandle(hOutput);
   free(part_files);
   if (success) {
-    printf("Merge completed successfully\n");
-    printf("Total bytes written: %lld\n", total_written);
+    printf("  ✅ Merge completed successfully\n");
+    printf("  📊 Total bytes written: %lld\n", total_written);
     HANDLE hVerify =
         CreateFileW(output_file, GENERIC_READ, FILE_SHARE_READ, NULL,
                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hVerify != INVALID_HANDLE_VALUE) {
       LARGE_INTEGER file_size;
       if (GetFileSizeEx(hVerify, &file_size)) {
-        printf("Output file size: %lld bytes\n", file_size.QuadPart);
+        printf("  📁 Output file size: %lld bytes\n", file_size.QuadPart);
       }
       CloseHandle(hVerify);
     }
   } else {
-    printf("Merge failed\n");
+    printf("  ❌ Merge failed\n");
     DeleteFileW(output_file);
   }
   return success;
@@ -327,7 +327,7 @@ int validate_split_directory(const wchar_t *split_dir) {
   DWORD attr = GetFileAttributesW(split_dir);
   if (attr == INVALID_FILE_ATTRIBUTES) {
     char *path_char = wchar_to_char(split_dir);
-    printf("Directory does not exist or cannot be accessed: %s\n",
+    printf("  ❌ Directory does not exist or cannot be accessed: %s\n",
            path_char ? path_char : "[Unknown path]");
     if (path_char)
       free(path_char);
@@ -335,7 +335,7 @@ int validate_split_directory(const wchar_t *split_dir) {
   }
   if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) {
     char *path_char = wchar_to_char(split_dir);
-    printf("Path exists but is not a directory: %s\n",
+    printf("  ❌ Path exists but is not a directory: %s\n",
            path_char ? path_char : "[Unknown path]");
     if (path_char)
       free(path_char);
@@ -349,89 +349,186 @@ int get_current_directory(wchar_t *buffer, size_t buffer_size) {
   return (len > 0 && len < buffer_size);
 }
 
-int main(int argc, char *argv[]) {
-  SetConsoleOutputCP(CP_UTF8);
-  printf("========================================\n");
-  printf("          File Merge Tool\n");
-  printf("========================================\n\n");
-  if (argc != 2) {
-    printf("Usage: %s <split_directory>\n", argv[0]);
-    printf("\nExamples:\n");
-    printf("  %s \"C:\\path\\to\\largefile.zip-split\"\n", argv[0]);
-    printf("  %s \"relative\\path\\file-split\"\n", argv[0]);
-    printf("  %s \".\\folder with spaces-split\"\n", argv[0]);
-    printf("\nThis will create: \"C:\\path\\to\\largefile-merged.zip\"\n");
-    return 1;
+int find_split_directories(const wchar_t *search_dir, wchar_t ***dir_list,
+                           int *dir_count) {
+  wchar_t search_pattern[MAX_PATH_LENGTH];
+  if (!safe_path_join(search_pattern, MAX_PATH_LENGTH, search_dir, L"*")) {
+    return 0;
   }
-  char *utf8_path = ansi_to_utf8(argv[1]);
-  if (!utf8_path) {
-    printf("Error: Failed to convert argument encoding\n");
-    return 1;
+  WIN32_FIND_DATAW find_data;
+  HANDLE hFind = FindFirstFileW(search_pattern, &find_data);
+  if (hFind == INVALID_HANDLE_VALUE) {
+    return 0;
   }
-  char input_path[MAX_PATH_LENGTH];
-  strcpy_s(input_path, MAX_PATH_LENGTH, utf8_path);
-  normalize_path(input_path);
-  printf("Input path: %s\n", input_path);
-  wchar_t *split_dir = char_to_wchar(input_path);
-  if (!split_dir) {
-    printf("Error: Failed to convert path to wide string\n");
-    free(utf8_path);
-    return 1;
-  }
+  int capacity = 50;
+  *dir_list = (wchar_t **)safe_malloc(sizeof(wchar_t *) * capacity);
+  *dir_count = 0;
+  do {
+    if (wcscmp(find_data.cFileName, L".") == 0 ||
+        wcscmp(find_data.cFileName, L"..") == 0) {
+      continue;
+    }
+    if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      wchar_t *split_pos = wcsstr(find_data.cFileName, L"-split");
+      if (split_pos && wcslen(split_pos) == 6) {
+        wchar_t full_path[MAX_PATH_LENGTH];
+        safe_path_join(full_path, MAX_PATH_LENGTH, search_dir,
+                       find_data.cFileName);
+        if (*dir_count >= capacity) {
+          capacity *= 2;
+          *dir_list =
+              (wchar_t **)realloc(*dir_list, sizeof(wchar_t *) * capacity);
+          if (!*dir_list) {
+            FindClose(hFind);
+            return 0;
+          }
+        }
+        (*dir_list)[*dir_count] = _wcsdup(full_path);
+        if (!(*dir_list)[*dir_count]) {
+          FindClose(hFind);
+          return 0;
+        }
+        (*dir_count)++;
+      }
+    }
+  } while (FindNextFileW(hFind, &find_data));
+  FindClose(hFind);
+  return 1;
+}
+
+void print_usage(const char *program_name) {
+  printf("Usage:\n");
+  printf("  %s [split_directory1] [split_directory2] ...\n", program_name);
+  printf("\nExamples:\n");
+  printf("  %s\n", program_name);
+  printf("    - Automatically finds and merges all '-split' directories in "
+         "current folder\n\n");
+  printf("  %s \"C:\\path\\to\\largefile.zip-split\"\n", program_name);
+  printf("    - Merges the specified split directory\n\n");
+  printf("  %s \"folder1-split\" \"folder2-split\" \"folder3-split\"\n",
+         program_name);
+  printf("    - Merges multiple specified split directories\n\n");
+  printf("Output files will be created with '-merged' suffix in the same "
+         "location\n");
+}
+
+int process_single_directory(const wchar_t *split_dir) {
   wchar_t absolute_path[MAX_PATH_LENGTH];
   if (GetFullPathNameW(split_dir, MAX_PATH_LENGTH, absolute_path, NULL) == 0) {
     wcscpy_s(absolute_path, MAX_PATH_LENGTH, split_dir);
   }
   char *absolute_path_char = wchar_to_char(absolute_path);
-  printf("Absolute path: %s\n",
+  printf("📁 Processing: %s\n",
          absolute_path_char ? absolute_path_char : "[Unable to display]");
   if (absolute_path_char)
     free(absolute_path_char);
   if (!validate_split_directory(absolute_path)) {
-    printf("Error: Split directory does not exist or is not accessible\n");
-    wchar_t current_dir[MAX_PATH_LENGTH];
-    if (get_current_directory(current_dir, MAX_PATH_LENGTH)) {
-      char *current_dir_char = wchar_to_char(current_dir);
-      printf("Current directory: %s\n",
-             current_dir_char ? current_dir_char : "[Unable to display]");
-      if (current_dir_char)
-        free(current_dir_char);
-    }
-    free(split_dir);
-    free(utf8_path);
-    return 1;
+    printf("  ❌ Invalid split directory\n\n");
+    return 0;
   }
   wchar_t merged_file_path[MAX_PATH_LENGTH];
   if (!get_merged_file_path(absolute_path, merged_file_path, MAX_PATH_LENGTH)) {
-    printf(
-        "Error: Could not determine output file path from split directory\n");
-    printf("Make sure the split directory name ends with '-split'\n");
-    free(split_dir);
-    free(utf8_path);
-    return 1;
+    printf("  ❌ Could not determine output file path\n");
+    printf("  ℹ️  Make sure the directory name ends with '-split'\n\n");
+    return 0;
   }
   char *merged_file_path_char = wchar_to_char(merged_file_path);
   if (merged_file_path_char) {
-    printf("Output file: %s\n", merged_file_path_char);
+    printf("  💾 Output: %s\n", merged_file_path_char);
     free(merged_file_path_char);
-  } else {
-    printf("Output file: [Unable to display path]\n");
   }
-  printf("\nStarting merge process...\n");
-  if (merge_part_files(absolute_path, merged_file_path)) {
-    printf("\nMerge completed successfully!\n");
-    char *merged_path_display = wchar_to_char(merged_file_path);
-    if (merged_path_display) {
-      printf("Output file: %s\n", merged_path_display);
-      free(merged_path_display);
+  int result = merge_part_files(absolute_path, merged_file_path);
+  printf("\n");
+  return result;
+}
+
+int main(int argc, char *argv[]) {
+  SetConsoleOutputCP(CP_UTF8);
+  printf("========================================\n");
+  printf("          File Merge Tool\n");
+  printf("========================================\n\n");
+  int total_processed = 0;
+  int successful_merges = 0;
+  if (argc == 1) {
+    printf(
+        "🔄 No arguments provided, searching for '-split' directories...\n\n");
+    wchar_t current_dir[MAX_PATH_LENGTH];
+    if (!get_current_directory(current_dir, MAX_PATH_LENGTH)) {
+      printf("❌ Could not get current directory\n");
+      return 1;
     }
-    free(split_dir);
-    free(utf8_path);
-    return 0;
+    char *current_dir_char = wchar_to_char(current_dir);
+    printf("📂 Current directory: %s\n\n",
+           current_dir_char ? current_dir_char : "[Unable to display]");
+    if (current_dir_char)
+      free(current_dir_char);
+    wchar_t **split_dirs = NULL;
+    int dir_count = 0;
+    if (!find_split_directories(current_dir, &split_dirs, &dir_count)) {
+      printf("❌ Error searching for split directories\n");
+      return 1;
+    }
+    if (dir_count == 0) {
+      printf("❌ No '-split' directories found in current folder\n");
+      printf("ℹ️  Please specify directories manually or run in a folder "
+             "containing split files\n\n");
+      print_usage(argv[0]);
+      return 1;
+    }
+    printf("🎯 Found %d split directory(ies):\n", dir_count);
+    for (int i = 0; i < dir_count; i++) {
+      char *dir_char = wchar_to_char(split_dirs[i]);
+      printf("  %d. %s\n", i + 1, dir_char ? dir_char : "[Unable to display]");
+      if (dir_char)
+        free(dir_char);
+    }
+    printf("\n");
+    for (int i = 0; i < dir_count; i++) {
+      total_processed++;
+      if (process_single_directory(split_dirs[i])) {
+        successful_merges++;
+      }
+      free(split_dirs[i]);
+    }
+    free(split_dirs);
   } else {
-    printf("\nMerge failed!\n");
-    free(split_dir);
-    free(utf8_path);
+    for (int i = 1; i < argc; i++) {
+      char *utf8_path = ansi_to_utf8(argv[i]);
+      if (!utf8_path) {
+        printf("❌ Failed to convert argument encoding: %s\n", argv[i]);
+        continue;
+      }
+      char input_path[MAX_PATH_LENGTH];
+      strcpy_s(input_path, MAX_PATH_LENGTH, utf8_path);
+      normalize_path(input_path);
+      wchar_t *split_dir = char_to_wchar(input_path);
+      if (!split_dir) {
+        printf("❌ Failed to convert path to wide string: %s\n", input_path);
+        free(utf8_path);
+        continue;
+      }
+      total_processed++;
+      if (process_single_directory(split_dir)) {
+        successful_merges++;
+      }
+      free(split_dir);
+      free(utf8_path);
+    }
+  }
+  printf("========================================\n");
+  printf("             Summary\n");
+  printf("========================================\n");
+  printf("📊 Directories processed: %d\n", total_processed);
+  printf("✅ Successful merges: %d\n", successful_merges);
+  printf("❌ Failed merges: %d\n", total_processed - successful_merges);
+  if (successful_merges == total_processed && total_processed > 0) {
+    printf("\n🎉 All merges completed successfully!\n");
+    return 0;
+  } else if (successful_merges > 0) {
+    printf("\n⚠️  Some merges completed with errors\n");
+    return 1;
+  } else {
+    printf("\n💥 All merges failed!\n");
     return 1;
   }
 }
