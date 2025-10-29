@@ -2347,10 +2347,7 @@ int create_temp_commit_file(const char *temp_filename) {
     printf("[错误] 无法创建临时文件: %s\n", temp_filename);
     return 0;
   }
-  fprintf(file, "# 自动生成的提交信息\n");
-  fprintf(file, "# 创建时间: %s\n", get_current_time());
-  fprintf(file, "# 临时文件: %s\n", temp_filename);
-  fprintf(file, "\n");
+  fprintf(file, "%s\n", get_current_time());
   char line[1024];
   int line_count = 0;
   int first_line = 1;
