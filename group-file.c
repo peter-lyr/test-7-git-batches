@@ -2042,28 +2042,16 @@ void execute_git_commands(const GroupResult *result,
       total_paths_processed += current_command_path_count;
     }
     if (commit_info_file && commit_info_file[0] != '\0') {
-      printf("\n执行提交: git commit -F %s\n", commit_info_file);
-      char temp_commit_file[MAX_PATH_LENGTH];
-      snprintf(temp_commit_file, MAX_PATH_LENGTH, "commit_temp_%d.txt",
-               group_idx + 1);
-      FILE *src_file = fopen(commit_info_file, "r");
-      FILE *dst_file = fopen(temp_commit_file, "w");
-      if (src_file && dst_file) {
-        char buffer[1024];
-        while (fgets(buffer, sizeof(buffer), src_file)) {
-          fputs(buffer, dst_file);
+      printf("\n执行提交: git commit -F \"%s\"\n", commit_info_file);
+      int is_temp_file = 0;
+      char temp_dir[MAX_PATH_LENGTH];
+      if (GetTempPathA(MAX_PATH_LENGTH, temp_dir) > 0) {
+        if (strstr(commit_info_file, temp_dir) == commit_info_file) {
+          is_temp_file = 1;
         }
-        fprintf(dst_file, "\n第%d组/%d组", group_idx + 1, result->group_count);
-        fclose(src_file);
-        fclose(dst_file);
-        printf("    使用临时提交信息文件: %s (添加分组信息: 第%d组/%d组)\n",
-               temp_commit_file, group_idx + 1, result->group_count);
-      } else {
-        printf("    [警告] 无法创建临时提交信息文件，使用原文件\n");
-        strcpy_s(temp_commit_file, MAX_PATH_LENGTH, commit_info_file);
       }
       wchar_t commit_command[512];
-      wchar_t *wcommit_file = char_to_wchar(temp_commit_file);
+      wchar_t *wcommit_file = char_to_wchar(commit_info_file);
       if (wcommit_file) {
         _snwprintf_s(commit_command, _countof(commit_command), _TRUNCATE,
                      L"git commit -F \"%s\"", wcommit_file);
@@ -2076,9 +2064,6 @@ void execute_git_commands(const GroupResult *result,
           printf("[失败] 提交命令返回代码: %d\n", ret);
         }
         free(wcommit_file);
-        if (strcmp(temp_commit_file, commit_info_file) != 0) {
-          remove(temp_commit_file);
-        }
       } else {
         printf("[错误] 无法转换提交信息文件路径编码\n");
       }
@@ -2346,14 +2331,29 @@ int create_temp_commit_file(const char *temp_filename) {
   printf("========================================\n\n");
   printf("请输入提交信息（输入空行结束输入）:\n");
   printf("提示：可以输入多行文字，输入空行（只按回车）结束\n\n");
+  char temp_dir[MAX_PATH_LENGTH];
+  strcpy_s(temp_dir, MAX_PATH_LENGTH, temp_filename);
+  char *last_slash = strrchr(temp_dir, '\\');
+  if (last_slash) {
+    *last_slash = '\0';
+    wchar_t *wtemp_dir = char_to_wchar(temp_dir);
+    if (wtemp_dir) {
+      create_directory_recursive(wtemp_dir);
+      free(wtemp_dir);
+    }
+  }
   FILE *file = fopen(temp_filename, "w");
   if (!file) {
     printf("[错误] 无法创建临时文件: %s\n", temp_filename);
     return 0;
   }
-  fprintf(file, "# 自动生成的提交信息\n# 创建时间: %s\n\n", get_current_time());
+  fprintf(file, "# 自动生成的提交信息\n");
+  fprintf(file, "# 创建时间: %s\n", get_current_time());
+  fprintf(file, "# 临时文件: %s\n", temp_filename);
+  fprintf(file, "\n");
   char line[1024];
   int line_count = 0;
+  int first_line = 1;
   printf("> ");
   fflush(stdout);
   while (fgets(line, sizeof(line), stdin)) {
@@ -2364,7 +2364,12 @@ int create_temp_commit_file(const char *temp_filename) {
     if (strlen(line) == 0) {
       break;
     }
-    fprintf(file, "%s\n", line);
+    if (first_line) {
+      fprintf(file, "%s\n", line);
+      first_line = 0;
+    } else {
+      fprintf(file, "%s\n", line);
+    }
     line_count++;
     printf("> ");
     fflush(stdout);
@@ -2376,20 +2381,31 @@ int create_temp_commit_file(const char *temp_filename) {
     if (file) {
       fprintf(file, "自动提交 - %s\n", get_current_time());
       fclose(file);
+      line_count = 1;
+    } else {
+      printf("[错误] 无法重新创建临时文件\n");
+      return 0;
     }
   }
-  printf("\n[成功] 提交信息已保存到: %s\n", temp_filename);
-  printf("提交信息内容:\n");
-  printf("----------------------------------------\n");
-  file = fopen(temp_filename, "r");
-  if (file) {
-    char buffer[1024];
-    while (fgets(buffer, sizeof(buffer), file)) {
-      printf("%s", buffer);
+  printf("\n[成功] 提交信息已保存到临时文件\n");
+  printf("文件路径: %s\n", temp_filename);
+  if (line_count > 0) {
+    printf("提交信息内容:\n");
+    printf("----------------------------------------\n");
+    file = fopen(temp_filename, "r");
+    if (file) {
+      fseek(file, 3, SEEK_SET);
+      char buffer[1024];
+      while (fgets(buffer, sizeof(buffer), file)) {
+        printf("%s", buffer);
+      }
+      fclose(file);
+    } else {
+      printf("[警告] 无法读取临时文件内容\n");
     }
-    fclose(file);
+    printf("----------------------------------------\n");
   }
-  printf("----------------------------------------\n\n");
+  printf("\n");
   return 1;
 }
 
@@ -2411,9 +2427,15 @@ int main(int argc, char *argv[]) {
     use_git = 1;
     printf("提交信息文件: %s\n\n", commit_info_file);
   } else {
-    printf("[信息] 未指定提交信息文件，将创建临时文件\n");
-    snprintf(temp_commit_file, MAX_PATH_LENGTH, "commit_temp_%d.txt",
-             (int)time(NULL));
+    printf("[信息] 未指定提交信息文件，将在临时目录创建文件\n");
+    char temp_dir[MAX_PATH_LENGTH];
+    DWORD temp_path_len = GetTempPathA(MAX_PATH_LENGTH, temp_dir);
+    if (temp_path_len == 0 || temp_path_len > MAX_PATH_LENGTH) {
+      printf("[错误] 无法获取临时目录路径\n");
+      strcpy_s(temp_dir, MAX_PATH_LENGTH, ".");
+    }
+    snprintf(temp_commit_file, MAX_PATH_LENGTH, "%scommit_temp_%d_%d.txt",
+             temp_dir, (int)time(NULL), GetCurrentProcessId());
     if (create_temp_commit_file(temp_commit_file)) {
       commit_info_file = temp_commit_file;
       use_git = 1;
