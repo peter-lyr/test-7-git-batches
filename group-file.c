@@ -777,7 +777,7 @@ void collect_items_iterative(const wchar_t *wpath, FileItem *items,
   free(queue);
 }
 
-// 修改：改进的路径处理函数，检查文件夹是否包含大文件
+// 修改路径处理函数，不在目录路径后添加反斜杠
 void process_input_path(const char *path, FileItem *items, int *item_count,
                         long long *total_input_size,
                         long long *total_scanned_size,
@@ -786,15 +786,17 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
   char normalized_path[MAX_PATH_LENGTH];
   strcpy_s(normalized_path, MAX_PATH_LENGTH, path);
 
-  // 规范化路径（统一使用反斜杠）
+  // 规范化路径（统一使用反斜杠并移除末尾反斜杠）
   normalize_path(normalized_path);
 
   printf("[处理] 正在处理路径: %s\n", normalized_path);
 
-  // 检查是否是目录路径（以反斜杠结尾）
+  // 检查是否是目录路径（原路径可能以反斜杠结尾，但已被normalize_path处理）
   int is_directory_path = 0;
   size_t path_len = strlen(normalized_path);
-  if (path_len > 0 && normalized_path[path_len - 1] == '\\') {
+  // 检查原始路径是否以反斜杠结尾（规范化前）
+  if (path[path_len > 0 ? path_len - 1 : 0] == '\\' ||
+      path[path_len > 0 ? path_len - 1 : 0] == '/') {
     is_directory_path = 1;
     printf("  [信息] 识别为目录路径\n");
   }
@@ -815,15 +817,8 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
              normalized_path);
 
       if (*item_count < MAX_ITEMS) {
-        // 确保目录路径格式正确
-        char dir_path[MAX_PATH_LENGTH];
-        strcpy_s(dir_path, MAX_PATH_LENGTH, normalized_path);
-        size_t dir_len = strlen(dir_path);
-        if (dir_len > 0 && dir_path[dir_len - 1] != '\\') {
-          strcat_s(dir_path, MAX_PATH_LENGTH, "\\");
-        }
-
-        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, dir_path);
+        // 直接使用规范化后的路径，不添加反斜杠
+        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, normalized_path);
         items[*item_count].size = 0; // 无法计算大小，设为0
         items[*item_count].type = TYPE_DIRECTORY;
         (*item_count)++;
@@ -857,7 +852,7 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
     format_size(dir_size, size_str, sizeof(size_str));
     printf("       文件夹大小: %s\n", size_str);
 
-    // 修改：检查文件夹是否包含大文件
+    // 检查文件夹是否包含大文件
     printf("       检查文件夹是否包含大文件...\n");
     long long temp_scanned_size = 0;
     int has_large_files =
@@ -868,19 +863,12 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
       printf("       文件夹大小合适且不包含大文件，直接添加...\n");
 
       if (*item_count < MAX_ITEMS) {
-        // 确保目录路径格式正确
-        char dir_path[MAX_PATH_LENGTH];
-        strcpy_s(dir_path, MAX_PATH_LENGTH, normalized_path);
-        size_t dir_len = strlen(dir_path);
-        if (dir_len > 0 && dir_path[dir_len - 1] != '\\') {
-          strcat_s(dir_path, MAX_PATH_LENGTH, "\\");
-        }
-
-        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, dir_path);
+        // 直接使用规范化后的路径，不添加反斜杠
+        strcpy_s(items[*item_count].path, MAX_PATH_LENGTH, normalized_path);
         items[*item_count].size = dir_size;
         items[*item_count].type = TYPE_DIRECTORY;
         (*item_count)++;
-        printf("       已添加目录: %s\n", dir_path);
+        printf("       已添加目录: %s\n", normalized_path);
       }
     } else {
       if (dir_size > MAX_GROUP_SIZE) {
@@ -893,7 +881,6 @@ void process_input_path(const char *path, FileItem *items, int *item_count,
     }
 
     // 无论文件夹大小如何，都递归扫描内容
-    // 但只在文件夹大小超过限制或包含大文件时才在递归扫描中添加文件
     collect_items_iterative(wpath, items, item_count, total_scanned_size,
                             skipped_files_size, result);
   } else {
@@ -981,31 +968,36 @@ int compare_items(const void *a, const void *b) {
   return strcmp(item1->path, item2->path);
 }
 
-// 新增：检查路径包含关系的函数
+// 调整路径包含检查函数，适应无反斜杠结尾的目录路径
 int is_path_contained(const char *child_path, const char *parent_path) {
   if (!child_path || !parent_path)
     return 0;
 
   char normalized_child[MAX_PATH_LENGTH];
   char normalized_parent[MAX_PATH_LENGTH];
+  char parent_with_slash[MAX_PATH_LENGTH];
 
   strcpy_s(normalized_child, MAX_PATH_LENGTH, child_path);
   strcpy_s(normalized_parent, MAX_PATH_LENGTH, parent_path);
+  strcpy_s(parent_with_slash, MAX_PATH_LENGTH, parent_path);
 
   // 规范化路径
   normalize_path(normalized_child);
   normalize_path(normalized_parent);
+  normalize_path(parent_with_slash);
 
-  // 确保父路径以反斜杠结尾以便精确匹配
-  size_t parent_len = strlen(normalized_parent);
-  if (parent_len > 0 && normalized_parent[parent_len - 1] != '\\') {
-    if (parent_len < MAX_PATH_LENGTH - 1) {
-      strcat_s(normalized_parent, MAX_PATH_LENGTH, "\\");
-    }
+  // 为父路径添加一个反斜杠用于精确匹配检查
+  size_t parent_len = strlen(parent_with_slash);
+  if (parent_len > 0 && parent_with_slash[parent_len - 1] != '\\' &&
+      parent_len < MAX_PATH_LENGTH - 1) {
+    strcat_s(parent_with_slash, MAX_PATH_LENGTH, "\\");
   }
 
-  // 检查child_path是否以parent_path开头
-  return (strstr(normalized_child, normalized_parent) == normalized_child);
+  // 检查两种情况：
+  // 1. 子路径与父路径完全相同（父路径是子路径本身）
+  // 2. 子路径以父路径+反斜杠开头（父路径是子路径的上级目录）
+  return (strcmp(normalized_child, normalized_parent) == 0) ||
+         (strstr(normalized_child, parent_with_slash) == normalized_child);
 }
 
 // 新增：检查项是否被任何已分组文件夹包含
@@ -2586,7 +2578,8 @@ GroupResult process_input_paths(char *paths[], int path_count,
   return result;
 }
 
-// 修改：在执行git add命令时打印累积大小和分组总大小信息
+// 修改：在执行git
+// add命令时打印累积大小和分组总大小信息，并在提交信息中添加分组信息
 void execute_git_commands(const GroupResult *result,
                           const char *commit_info_file) {
   printf("\n========================================\n");
@@ -2750,8 +2743,37 @@ void execute_git_commands(const GroupResult *result,
     if (commit_info_file && commit_info_file[0] != '\0') {
       printf("\n执行提交: git commit -F %s\n", commit_info_file);
 
+      // 创建临时提交信息文件，添加分组信息
+      char temp_commit_file[MAX_PATH_LENGTH];
+      snprintf(temp_commit_file, MAX_PATH_LENGTH, "commit_temp_%d.txt",
+               group_idx + 1);
+
+      // 复制原提交信息文件内容到临时文件
+      FILE *src_file = fopen(commit_info_file, "r");
+      FILE *dst_file = fopen(temp_commit_file, "w");
+
+      if (src_file && dst_file) {
+        char buffer[1024];
+        while (fgets(buffer, sizeof(buffer), src_file)) {
+          fputs(buffer, dst_file);
+        }
+
+        // 在最后添加分组信息
+        fprintf(dst_file, "\n第%d组/%d组", group_idx + 1, result->group_count);
+
+        fclose(src_file);
+        fclose(dst_file);
+
+        printf("    使用临时提交信息文件: %s (添加分组信息: 第%d组/%d组)\n",
+               temp_commit_file, group_idx + 1, result->group_count);
+      } else {
+        printf("    [警告] 无法创建临时提交信息文件，使用原文件\n");
+        // 如果无法创建临时文件，使用原文件
+        strcpy_s(temp_commit_file, MAX_PATH_LENGTH, commit_info_file);
+      }
+
       wchar_t commit_command[512];
-      wchar_t *wcommit_file = char_to_wchar(commit_info_file);
+      wchar_t *wcommit_file = char_to_wchar(temp_commit_file);
       if (wcommit_file) {
         _snwprintf_s(commit_command, _countof(commit_command), _TRUNCATE,
                      L"git commit -F \"%s\"", wcommit_file);
@@ -2765,6 +2787,11 @@ void execute_git_commands(const GroupResult *result,
           printf("[失败] 提交命令返回代码: %d\n", ret);
         }
         free(wcommit_file);
+
+        // 删除临时文件（如果是我们创建的）
+        if (strcmp(temp_commit_file, commit_info_file) != 0) {
+          remove(temp_commit_file);
+        }
       } else {
         printf("[错误] 无法转换提交信息文件路径编码\n");
       }
