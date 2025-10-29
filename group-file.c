@@ -54,7 +54,7 @@ typedef struct {
   int gitignore_count;
   char **split_files; // 拆分文件路径
   int split_count;
-  int has_large_files; // 新增：标记是否处理过大文件
+  // int has_large_files; // 新增：标记是否处理过大文件
 } AdditionalFiles;
 
 // 函数声明
@@ -1703,7 +1703,7 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
   AdditionalFiles additional = {0};
   additional.gitignore_files = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
   additional.split_files = (char **)safe_malloc(sizeof(char *) * MAX_ITEMS);
-  additional.has_large_files = 0; // 初始化为没有处理大文件
+  // additional.has_large_files = 0; // 初始化为没有处理大文件
 
   if (result->skipped_count == 0) {
     printf("\n[信息] 没有跳过的大文件\n");
@@ -1943,7 +1943,7 @@ AdditionalFiles print_skipped_files(GroupResult *result) {
   // 在处理循环结束后，设置标记
   if (split_success_count > 0 || backup_success_count > 0 ||
       gitignore_update_count > 0) {
-    additional.has_large_files = 1;
+    // additional.has_large_files = 1;
     printf("\n[信息] 检测到大文件处理操作，程序将重启以重新扫描\n");
   }
 
@@ -1965,7 +1965,43 @@ void free_additional_files(AdditionalFiles *additional) {
   }
 }
 
-// 将额外文件添加到分组中
+// 新增：调试文件访问函数
+void debug_file_access(const char *file_path) {
+  printf("    [调试] 检查文件访问: %s\n", file_path);
+
+  // 使用ANSI API
+  DWORD attr_a = GetFileAttributesA(file_path);
+  if (attr_a == INVALID_FILE_ATTRIBUTES) {
+    DWORD error = GetLastError();
+    printf("      ANSI API: 无法访问 (错误: %lu)\n", error);
+  } else {
+    printf("      ANSI API: 属性: 0x%lX\n", attr_a);
+  }
+
+  // 使用Unicode API
+  wchar_t *wpath = char_to_wchar(file_path);
+  if (wpath) {
+    DWORD attr_w = GetFileAttributesW(wpath);
+    if (attr_w == INVALID_FILE_ATTRIBUTES) {
+      DWORD error = GetLastError();
+      printf("      Unicode API: 无法访问 (错误: %lu)\n", error);
+    } else {
+      printf("      Unicode API: 属性: 0x%lX\n", attr_w);
+    }
+    free(wpath);
+  }
+
+  // 尝试直接打开文件
+  FILE *test_file = fopen(file_path, "rb");
+  if (test_file) {
+    printf("      fopen: 成功打开文件\n");
+    fclose(test_file);
+  } else {
+    printf("      fopen: 无法打开文件\n");
+  }
+}
+
+// 修改：改进的添加额外文件到分组函数，使用宽字符API解决中文路径问题
 void add_additional_files_to_groups(GroupResult *result,
                                     AdditionalFiles *additional) {
   if (!additional ||
@@ -1979,38 +2015,59 @@ void add_additional_files_to_groups(GroupResult *result,
   FileItem *new_items = (FileItem *)safe_malloc(sizeof(FileItem) * MAX_ITEMS);
   int new_item_count = 0;
 
-  // 添加.gitignore文件
+  // 添加.gitignore文件 - 使用宽字符API解决中文路径问题
   for (int i = 0; i < additional->gitignore_count && new_item_count < MAX_ITEMS;
        i++) {
     char *path = additional->gitignore_files[i];
 
-    // 检查文件是否存在
-    DWORD attr = GetFileAttributesA(path);
-    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-      // 获取文件大小
-      HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-      if (hFile != INVALID_HANDLE_VALUE) {
-        DWORD sizeLow, sizeHigh;
-        sizeLow = GetFileSize(hFile, &sizeHigh);
-        CloseHandle(hFile);
+    // 在检查.gitignore文件之前添加调试
+    printf("    检查.gitignore文件: %s\n", path);
+    debug_file_access(path); // 添加这行来调试
 
-        ULARGE_INTEGER file_size;
-        file_size.LowPart = sizeLow;
-        file_size.HighPart = sizeHigh;
+    // 使用宽字符API检查文件状态，解决中文路径问题
+    wchar_t *wpath = char_to_wchar(path);
+    if (wpath) {
+      DWORD attr = GetFileAttributesW(wpath);
+      printf("    检查.gitignore文件: %s (属性: %ld)\n", path, attr);
 
-        strcpy_s(new_items[new_item_count].path, MAX_PATH_LENGTH, path);
-        new_items[new_item_count].size = file_size.QuadPart;
-        new_items[new_item_count].type = TYPE_FILE;
-        new_item_count++;
+      if (attr != INVALID_FILE_ATTRIBUTES &&
+          !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        // 获取文件大小 - 使用宽字符API
+        HANDLE hFile = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile != INVALID_HANDLE_VALUE) {
+          DWORD sizeLow, sizeHigh;
+          sizeLow = GetFileSize(hFile, &sizeHigh);
+          CloseHandle(hFile);
 
-        printf("  添加.gitignore文件: %s (%lld bytes)\n", path,
-               file_size.QuadPart);
+          ULARGE_INTEGER file_size;
+          file_size.LowPart = sizeLow;
+          file_size.HighPart = sizeHigh;
+
+          strcpy_s(new_items[new_item_count].path, MAX_PATH_LENGTH, path);
+          new_items[new_item_count].size = file_size.QuadPart;
+          new_items[new_item_count].type = TYPE_FILE;
+          new_item_count++;
+
+          printf("      添加.gitignore文件: %s (%lld bytes)\n", path,
+                 file_size.QuadPart);
+        } else {
+          printf("      警告: 无法打开.gitignore文件: %s (错误: %lu)\n", path,
+                 GetLastError());
+        }
+      } else {
+        printf("      警告: .gitignore文件不存在或无法访问: %s\n", path);
+        if (attr == INVALID_FILE_ATTRIBUTES) {
+          printf("        错误代码: %lu\n", GetLastError());
+        }
       }
+      free(wpath);
+    } else {
+      printf("      错误: 无法转换.gitignore文件路径编码: %s\n", path);
     }
   }
 
-  // 添加拆分目录中的所有文件
+  // 添加拆分目录中的所有文件 - 这部分已经使用宽字符API，应该没问题
   for (int i = 0; i < additional->split_count && new_item_count < MAX_ITEMS;
        i++) {
     char *split_dir = additional->split_files[i];
@@ -2021,6 +2078,8 @@ void add_additional_files_to_groups(GroupResult *result,
       // 递归收集拆分目录中的所有文件
       collect_split_directory_files(wsplit_dir, new_items, &new_item_count);
       free(wsplit_dir);
+    } else {
+      printf("      错误: 无法转换拆分目录路径编码: %s\n", split_dir);
     }
   }
 
@@ -2058,7 +2117,7 @@ void add_additional_files_to_groups(GroupResult *result,
         group->items[group->count++] = *item;
         group->total_size += item->size;
 
-        printf("    已添加 '%s' 到分组 %d\n", item->path, best_group + 1);
+        printf("      已添加 '%s' 到分组 %d\n", item->path, best_group + 1);
       } else {
         // 创建新分组
         if (result->group_count >= result->groups_capacity) {
@@ -2091,7 +2150,7 @@ void add_additional_files_to_groups(GroupResult *result,
         new_group->total_size += item->size;
         result->group_count++;
 
-        printf("    已创建新分组 %d 并添加 '%s'\n", result->group_count,
+        printf("      已创建新分组 %d 并添加 '%s'\n", result->group_count,
                item->path);
       }
     }
@@ -2160,7 +2219,7 @@ void collect_split_directory_files(const wchar_t *wdir_path, FileItem *items,
   FindClose(hFind);
 }
 
-// 修改：改进.gitignore更新逻辑，避免重复添加
+// 修改：改进.gitignore更新逻辑，确保文件正确关闭
 int update_gitignore_for_skipped_file(const char *skipped_file_path) {
   // 提取目录路径
   char dir_path[MAX_PATH_LENGTH];
@@ -2282,11 +2341,12 @@ int update_gitignore_for_skipped_file(const char *skipped_file_path) {
 
   // 如果尚未忽略，则添加到.gitignore
   if (!already_ignored) {
-    FILE *file =
-        _wfopen(wgitignore_path, L"ab"); // 追加模式，二进制写入避免编码问题
-    if (!file) {
-      // 尝试创建新文件
-      file = _wfopen(wgitignore_path, L"wb");
+    FILE *file = NULL;
+
+    if (file_exists) {
+      file = _wfopen(wgitignore_path, L"ab"); // 追加模式
+    } else {
+      file = _wfopen(wgitignore_path, L"wb"); // 创建新文件
     }
 
     if (file) {
@@ -2308,6 +2368,9 @@ int update_gitignore_for_skipped_file(const char *skipped_file_path) {
 
       // 写入忽略条目
       fprintf(file, "%s\n", backup_filename);
+
+      // 确保文件内容刷新到磁盘
+      fflush(file);
       fclose(file);
 
       printf("    [成功] 已更新.gitignore: %s -> %s\n", gitignore_path,
@@ -2833,18 +2896,18 @@ int run_grouping_test_with_git(char *paths[], int path_count,
   // 先调用print_skipped_files，它会返回需要添加的额外文件
   AdditionalFiles additional = print_skipped_files(&result);
 
-  // 检查是否处理过大文件，如果是则重启程序
-  if (additional.has_large_files) {
-    printf("\n[重启] 检测到大文件处理，准备重启程序...\n");
-
-    // 释放内存
-    // free_additional_files(&additional);
-    // free_group_result(&result);
-
-    // 重启程序（这里需要传递argv参数，稍后在main函数中处理）
-    // 重启逻辑将在main函数中实现
-    // return 1;
-  }
+  // // 检查是否处理过大文件，如果是则重启程序
+  // if (additional.has_large_files) {
+  //   printf("\n[重启] 检测到大文件处理，准备重启程序...\n");
+  //
+  //   // 释放内存
+  //   free_additional_files(&additional);
+  //   free_group_result(&result);
+  //
+  //   // 重启程序（这里需要传递argv参数，稍后在main函数中处理）
+  //   // 重启逻辑将在main函数中实现
+  //   return 1;
+  // }
 
   // 如果没有重启，继续正常流程
   // 将额外文件添加到分组中
@@ -2857,7 +2920,7 @@ int run_grouping_test_with_git(char *paths[], int path_count,
                   skipped_files_size);
 
   // 执行Git操作
-  // execute_git_commands(&result, commit_info_file);
+  execute_git_commands(&result, commit_info_file);
 
   // 释放内存
   free_additional_files(&additional);
@@ -2875,16 +2938,16 @@ int run_grouping_test(char *paths[], int path_count) {
   // 处理大文件
   AdditionalFiles additional = print_skipped_files(&result);
 
-  // 检查是否处理过大文件，如果是则重启程序
-  if (additional.has_large_files) {
-    printf("\n[重启] 检测到大文件处理，准备重启程序...\n");
-
-    // 释放内存
-    // free_additional_files(&additional);
-    // free_group_result(&result);
-
-    return 1;
-  }
+  // // 检查是否处理过大文件，如果是则重启程序
+  // if (additional.has_large_files) {
+  //   printf("\n[重启] 检测到大文件处理，准备重启程序...\n");
+  //
+  //   // 释放内存
+  //   free_additional_files(&additional);
+  //   free_group_result(&result);
+  //
+  //   return 1;
+  // }
 
   // 如果没有重启，继续正常流程
   add_additional_files_to_groups(&result, &additional);
@@ -3086,91 +3149,92 @@ void free_git_status_paths(char **paths, int path_count) {
   free(paths);
 }
 
-// 修改：改进重启程序函数，使用正确的命令提示符
-void restart_program(char *argv[], int has_processed_large_files) {
-  printf("\n========================================\n");
-  printf("              程序重启\n");
-  printf("========================================\n\n");
-
-  if (has_processed_large_files) {
-    printf("[信息] 检测到大文件已处理，正在重启程序以重新扫描...\n");
-
-    // 获取当前工作目录
-    char current_dir[MAX_PATH_LENGTH];
-    if (!GetCurrentDirectoryA(MAX_PATH_LENGTH, current_dir)) {
-      printf("[错误] 无法获取当前工作目录\n");
-      return;
-    }
-
-    // 获取当前程序路径
-    char exe_path[MAX_PATH_LENGTH];
-    if (GetModuleFileNameA(NULL, exe_path, MAX_PATH_LENGTH) == 0) {
-      printf("[错误] 无法获取程序路径，无法自动重启\n");
-      return;
-    }
-
-    // 构建cmd命令
-    char cmd[MAX_PATH_LENGTH * 3] = {0};
-    if (argv[1] != NULL) {
-      // 有提交信息文件参数
-      snprintf(cmd, sizeof(cmd), "cmd /k \"\"%s\" \"%s\"\"", exe_path, argv[1]);
-    } else {
-      // 没有参数
-      snprintf(cmd, sizeof(cmd), "cmd /k \"\"%s\"\"", exe_path);
-    }
-
-    printf("重启命令: %s\n", cmd);
-    printf("工作目录: %s\n", current_dir);
-
-    // 创建进程信息
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
-
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    ZeroMemory(&pi, sizeof(pi));
-
-    // 启动新进程（使用cmd /k 保持窗口打开）
-    if (CreateProcessA(NULL,               // 不使用模块名
-                       cmd,                // 命令行
-                       NULL,               // 进程句柄不可继承
-                       NULL,               // 线程句柄不可继承
-                       FALSE,              // 不继承句柄
-                       CREATE_NEW_CONSOLE, // 创建新控制台
-                       NULL,               // 使用父进程环境块
-                       current_dir,        // 指定工作目录
-                       &si,                // STARTUPINFO 指针
-                       &pi                 // PROCESS_INFORMATION 指针
-                       )) {
-      printf("[成功] 新进程已启动 (PID: %lu)，当前进程将退出\n",
-             pi.dwProcessId);
-
-      // 等待一段时间确保新进程启动
-      Sleep(2000);
-
-      // 关闭进程和线程句柄
-      CloseHandle(pi.hProcess);
-      CloseHandle(pi.hThread);
-
-      // 退出当前进程
-      exit(0);
-    } else {
-      DWORD error = GetLastError();
-      printf("[错误] 无法启动新进程 (错误代码: %lu)\n", error);
-      printf("[信息] 请手动重新运行程序\n");
-
-      // 提供手动重启的指令
-      printf("\n手动重启指令:\n");
-      if (argv[1] != NULL) {
-        printf("  \"%s\" \"%s\"\n", exe_path, argv[1]);
-      } else {
-        printf("  \"%s\"\n", exe_path);
-      }
-    }
-  } else {
-    printf("[信息] 没有大文件需要处理，无需重启\n");
-  }
-}
+// // 修改：改进重启程序函数，使用正确的命令提示符
+// void restart_program(char *argv[], int has_processed_large_files) {
+//   printf("\n========================================\n");
+//   printf("              程序重启\n");
+//   printf("========================================\n\n");
+//
+//   if (has_processed_large_files) {
+//     printf("[信息] 检测到大文件已处理，正在重启程序以重新扫描...\n");
+//
+//     // 获取当前工作目录
+//     char current_dir[MAX_PATH_LENGTH];
+//     if (!GetCurrentDirectoryA(MAX_PATH_LENGTH, current_dir)) {
+//       printf("[错误] 无法获取当前工作目录\n");
+//       return;
+//     }
+//
+//     // 获取当前程序路径
+//     char exe_path[MAX_PATH_LENGTH];
+//     if (GetModuleFileNameA(NULL, exe_path, MAX_PATH_LENGTH) == 0) {
+//       printf("[错误] 无法获取程序路径，无法自动重启\n");
+//       return;
+//     }
+//
+//     // 构建cmd命令
+//     char cmd[MAX_PATH_LENGTH * 3] = {0};
+//     if (argv[1] != NULL) {
+//       // 有提交信息文件参数
+//       snprintf(cmd, sizeof(cmd), "cmd /k \"\"%s\" \"%s\"\"", exe_path,
+//       argv[1]);
+//     } else {
+//       // 没有参数
+//       snprintf(cmd, sizeof(cmd), "cmd /k \"\"%s\"\"", exe_path);
+//     }
+//
+//     printf("重启命令: %s\n", cmd);
+//     printf("工作目录: %s\n", current_dir);
+//
+//     // 创建进程信息
+//     STARTUPINFOA si;
+//     PROCESS_INFORMATION pi;
+//
+//     ZeroMemory(&si, sizeof(si));
+//     si.cb = sizeof(si);
+//     ZeroMemory(&pi, sizeof(pi));
+//
+//     // 启动新进程（使用cmd /k 保持窗口打开）
+//     if (CreateProcessA(NULL,               // 不使用模块名
+//                        cmd,                // 命令行
+//                        NULL,               // 进程句柄不可继承
+//                        NULL,               // 线程句柄不可继承
+//                        FALSE,              // 不继承句柄
+//                        CREATE_NEW_CONSOLE, // 创建新控制台
+//                        NULL,               // 使用父进程环境块
+//                        current_dir,        // 指定工作目录
+//                        &si,                // STARTUPINFO 指针
+//                        &pi                 // PROCESS_INFORMATION 指针
+//                        )) {
+//       printf("[成功] 新进程已启动 (PID: %lu)，当前进程将退出\n",
+//              pi.dwProcessId);
+//
+//       // 等待一段时间确保新进程启动
+//       Sleep(2000);
+//
+//       // 关闭进程和线程句柄
+//       CloseHandle(pi.hProcess);
+//       CloseHandle(pi.hThread);
+//
+//       // 退出当前进程
+//       exit(0);
+//     } else {
+//       DWORD error = GetLastError();
+//       printf("[错误] 无法启动新进程 (错误代码: %lu)\n", error);
+//       printf("[信息] 请手动重新运行程序\n");
+//
+//       // 提供手动重启的指令
+//       printf("\n手动重启指令:\n");
+//       if (argv[1] != NULL) {
+//         printf("  \"%s\" \"%s\"\n", exe_path, argv[1]);
+//       } else {
+//         printf("  \"%s\"\n", exe_path);
+//       }
+//     }
+//   } else {
+//     printf("[信息] 没有大文件需要处理，无需重启\n");
+//   }
+// }
 
 int main(int argc, char *argv[]) {
   // 设置控制台输出为UTF-8
@@ -3224,21 +3288,22 @@ int main(int argc, char *argv[]) {
   }
   printf("\n");
 
-  int need_restart = 0;
+  // int need_restart = 0;
   // 根据参数选择是否使用Git功能
   if (use_git) {
-    need_restart =
-        run_grouping_test_with_git(input_paths, path_count, commit_info_file);
+    // need_restart =
+    run_grouping_test_with_git(input_paths, path_count, commit_info_file);
   } else {
-    need_restart = run_grouping_test(input_paths, path_count);
+    // need_restart =
+    run_grouping_test(input_paths, path_count);
   }
 
-  // 检查是否需要重启
-  if (need_restart) {
-    restart_program(argv, 1);
-    // 如果重启函数返回，说明重启失败，继续执行
-    printf("[警告] 重启失败，继续执行后续操作\n");
-  }
+  // // 检查是否需要重启
+  // if (need_restart) {
+  //   restart_program(argv, 1);
+  //   // 如果重启函数返回，说明重启失败，继续执行
+  //   printf("[警告] 重启失败，继续执行后续操作\n");
+  // }
 
   // 如果是动态分配的内存，需要释放
   if (input_paths != NULL && path_count > 0) {
