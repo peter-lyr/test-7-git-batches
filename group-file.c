@@ -2447,12 +2447,7 @@ int main(int argc, char *argv[]) {
   char **input_paths = get_git_status_paths(&path_count);
   if (path_count == 0 || !input_paths) {
     printf("[错误] 无法从git status获取文件列表或没有变更文件\n");
-    printf("[信息] 使用备用路径\n");
-    char *backup_paths[] = {
-        ".",
-    };
-    input_paths = backup_paths;
-    path_count = sizeof(backup_paths) / sizeof(backup_paths[0]);
+    exit(2);
   }
   printf("\n最终扫描路径 (%d 个文件):\n", path_count);
   for (int i = 0; i < (path_count > 10 ? 10 : path_count); i++) {
