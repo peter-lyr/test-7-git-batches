@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <windows.h>
 
 #define MAX_PATH_LENGTH 4096
@@ -2168,6 +2169,14 @@ void print_detailed_group_info(const FileGroup *group, int group_index) {
   printf("\n");
 }
 
+char *get_current_time() {
+  static char time_str[64];
+  time_t now = time(NULL);
+  struct tm *tm_info = localtime(&now);
+  strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+  return time_str;
+}
+
 int run_grouping_test_with_git(char *paths[], int path_count,
                                const char *commit_info_file) {
   long long total_scanned_size, skipped_files_size;
@@ -2331,6 +2340,59 @@ void free_git_status_paths(char **paths, int path_count) {
   free(paths);
 }
 
+int create_temp_commit_file(const char *temp_filename) {
+  printf("\n========================================\n");
+  printf("          创建提交信息\n");
+  printf("========================================\n\n");
+  printf("请输入提交信息（输入空行结束输入）:\n");
+  printf("提示：可以输入多行文字，输入空行（只按回车）结束\n\n");
+  FILE *file = fopen(temp_filename, "w");
+  if (!file) {
+    printf("[错误] 无法创建临时文件: %s\n", temp_filename);
+    return 0;
+  }
+  fprintf(file, "# 自动生成的提交信息\n# 创建时间: %s\n\n", get_current_time());
+  char line[1024];
+  int line_count = 0;
+  printf("> ");
+  fflush(stdout);
+  while (fgets(line, sizeof(line), stdin)) {
+    size_t len = strlen(line);
+    if (len > 0 && line[len - 1] == '\n') {
+      line[len - 1] = '\0';
+    }
+    if (strlen(line) == 0) {
+      break;
+    }
+    fprintf(file, "%s\n", line);
+    line_count++;
+    printf("> ");
+    fflush(stdout);
+  }
+  fclose(file);
+  if (line_count == 0) {
+    printf("[警告] 未输入任何提交信息，使用默认信息\n");
+    file = fopen(temp_filename, "w");
+    if (file) {
+      fprintf(file, "自动提交 - %s\n", get_current_time());
+      fclose(file);
+    }
+  }
+  printf("\n[成功] 提交信息已保存到: %s\n", temp_filename);
+  printf("提交信息内容:\n");
+  printf("----------------------------------------\n");
+  file = fopen(temp_filename, "r");
+  if (file) {
+    char buffer[1024];
+    while (fgets(buffer, sizeof(buffer), file)) {
+      printf("%s", buffer);
+    }
+    fclose(file);
+  }
+  printf("----------------------------------------\n\n");
+  return 1;
+}
+
 int main(int argc, char *argv[]) {
   SetConsoleOutputCP(CP_UTF8);
   printf("========================================\n");
@@ -2342,13 +2404,25 @@ int main(int argc, char *argv[]) {
   }
   const char *commit_info_file = NULL;
   int use_git = 0;
+  int temp_file_created = 0;
+  char temp_commit_file[MAX_PATH_LENGTH];
   if (argc >= 2) {
     commit_info_file = argv[1];
     use_git = 1;
     printf("提交信息文件: %s\n\n", commit_info_file);
   } else {
-    printf("[信息] 未指定提交信息文件，将跳过Git操作\n");
-    printf("用法: %s <commit-info.txt>\n\n", argv[0]);
+    printf("[信息] 未指定提交信息文件，将创建临时文件\n");
+    snprintf(temp_commit_file, MAX_PATH_LENGTH, "commit_temp_%d.txt",
+             (int)time(NULL));
+    if (create_temp_commit_file(temp_commit_file)) {
+      commit_info_file = temp_commit_file;
+      use_git = 1;
+      temp_file_created = 1;
+      printf("临时提交信息文件: %s\n\n", temp_commit_file);
+    } else {
+      printf("[错误] 无法创建临时提交信息文件，将跳过Git操作\n");
+      use_git = 0;
+    }
   }
   int path_count = 0;
   char **input_paths = get_git_status_paths(&path_count);
@@ -2373,6 +2447,10 @@ int main(int argc, char *argv[]) {
     run_grouping_test_with_git(input_paths, path_count, commit_info_file);
   } else {
     run_grouping_test(input_paths, path_count);
+  }
+  if (temp_file_created) {
+    remove(temp_commit_file);
+    printf("[清理] 已删除临时提交信息文件: %s\n", temp_commit_file);
   }
   if (input_paths != NULL && path_count > 0) {
     if (strcmp(input_paths[0], ".") != 0) {
